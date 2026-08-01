@@ -3,7 +3,7 @@ module github.com/tsvsheet/tsvsheet.api
 go 1.26.5
 
 require (
-	github.com/gomatic/go-error v0.3.10
+	github.com/gomatic/go-error v0.3.13
 	github.com/stretchr/testify v1.11.1
 	github.com/tsvsheet/go-tsvsheet v0.27.0
 	github.com/urfave/cli/v3 v3.10.1
