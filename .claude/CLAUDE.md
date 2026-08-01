@@ -10,7 +10,7 @@
 
 ## Non-negotiables
 
-- **The source/computed rule is a hard safety rule.** `application/vnd.tsvsheet+tsv`, `text/tab-separated-values`, and `text/csv` mean *computed values* (§9 importers ingest them values-only); source bytes are only ever served as `application/vnd.tsvsheet.doc+tsv`. A values `Accept` without the compute plane is `406`, never source.
+- **The source/computed rule is a hard safety rule.** `application/vnd.tsvsheet+tsv`, `text/tab-separated-values`, and `text/csv` mean _computed values_ (§9 importers ingest them values-only); source bytes are only ever served as `application/vnd.tsvsheet.doc+tsv`. A values `Accept` without the compute plane is `406`, never source.
 - **One engine.** Every semantic act — canonicalization, op application, computation — is [go-tsvsheet](https://github.com/tsvsheet/go-tsvsheet). No parsing or evaluation is re-implemented here.
 - **The document plane never evaluates an expression** — op application parses formulas for AST rewriting only. Compute is an additive, advertised capability (`Tsvsheet-Capabilities`).
 - **The full gomatic Go gate applies:** `make check` green — 100% aggregate coverage, gocognit ≤ 7, `errs.Const` sentinels in [internal/constants](internal/constants/), no `fmt.Errorf`/`errors.New` in production code, value receivers except the documented stateful types (store, hub, handler, replay cache).
