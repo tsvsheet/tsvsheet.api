@@ -80,17 +80,45 @@ func TestRemoveFailureSurfacesAsWriteError(t *testing.T) {
 	assert.ErrorIs(t, err, constants.ErrDocWrite)
 }
 
-func TestPutThroughAFilePathFails(t *testing.T) {
-	// "sub" is a file, so reading sub/x.tsvt fails with ENOTDIR — a read
-	// refusal, not a missing document.
+func TestPathThroughAFileIsMissingThenUnwritable(t *testing.T) {
+	// "sub" is a file, so nothing can resolve at sub/x.tsvt: the read is a
+	// missing document (404 to a client), and the write refuses.
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub"), []byte("a file"), 0o600))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
+	_, getErr := st.Get("sub/x.tsvt")
+	require.Error(t, getErr)
+	assert.ErrorIs(t, getErr, constants.ErrDocMissing)
 	_, _, putErr := st.Put("sub/x.tsvt", []byte("1\n"), ExpectAbsent())
 	require.Error(t, putErr)
-	assert.ErrorIs(t, putErr, constants.ErrDocRead)
+	assert.ErrorIs(t, putErr, constants.ErrDocWrite)
 }
+
+// TestEscapingSymlinkIsMissingNotAServerFault pins that a client-named path
+// os.Root refuses reads as "not found": the content is withheld either way,
+// but a 500 would blame the server and disclose that the escaping name exists.
+func TestEscapingSymlinkIsMissingNotAServerFault(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "secret.tsvt")
+	require.NoError(t, os.WriteFile(outside, []byte("secret\n"), 0o600))
+	dir := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "link.tsvt")))
+	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
+	require.NoError(t, err)
+	_, getErr := st.Get("link.tsvt")
+	require.Error(t, getErr)
+	assert.ErrorIs(t, getErr, constants.ErrDocMissing)
+	assert.NotContains(t, errText(getErr), "secret")
+}
+
+func TestInvalidNameIsMissing(t *testing.T) {
+	st, _ := seeded(t)
+	_, err := st.Get(DocPath("a.tsvt\x00.png"))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, constants.ErrDocMissing)
+}
+
+func TestErrTextOfNilIsEmpty(t *testing.T) { assert.Empty(t, errText(nil)) }
 
 func TestMkdirFailureSurfacesAsWriteError(t *testing.T) {
 	dir := t.TempDir()

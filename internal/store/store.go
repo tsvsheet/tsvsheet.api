@@ -13,6 +13,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"syscall"
 
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 
@@ -153,7 +154,11 @@ func (s *Store) load(p DocPath) (tsvsheet.Document, Snapshot, error) {
 		return tsvsheet.Document{}, Snapshot{}, err
 	}
 	raw, err := s.root.ReadFile(string(p))
-	if errors.Is(err, fs.ErrNotExist) {
+	if errors.Is(err, fs.ErrNotExist) || isRefusedPath(err) {
+		// A path os.Root refuses — an escaping symlink, a name the OS will not
+		// open — is a client-named path that resolves to nothing servable, so
+		// it is "not found", not a server fault. Reporting it as 500 would both
+		// blame the server and disclose that the escaping name exists.
 		return tsvsheet.Document{}, Snapshot{}, constants.ErrDocMissing.With(err, "path", string(p))
 	}
 	if err != nil {
@@ -211,6 +216,25 @@ func (s *Store) write(p DocPath, data []byte) error {
 // snapshotOf canonicalizes a parsed document into its served state.
 func snapshotOf(doc tsvsheet.Document) Snapshot {
 	return Snapshot{Doc: doc, Text: doc.Text(), Rev: tsvsheet.Revision(doc)}
+}
+
+// isRefusedPath reports whether the error is os.Root's refusal to resolve a
+// name (an escape) or the OS refusing the name outright (an invalid byte).
+func isRefusedPath(err error) bool {
+	return errors.Is(err, fs.ErrInvalid) || errors.Is(err, syscall.EINVAL) ||
+		errors.Is(err, syscall.ENOTDIR) || strings.Contains(errText(err), escapeMarker)
+}
+
+// escapeMarker is what os.Root reports when a symlink leaves the root; the
+// package exports no sentinel for it.
+const escapeMarker = "escapes from parent"
+
+// errText is err's message, or "" for no error.
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // validate refuses a path that is not a clean relative path inside the root,

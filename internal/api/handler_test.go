@@ -303,7 +303,8 @@ func TestComputedWholeGrid(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, api.TypeSheet, rec.Header().Get("Content-Type"))
 	assert.Equal(t, "2\t6\n", rec.Body.String())
-	assert.Equal(t, etag(t, "2\t=A1*3\n"), rec.Header().Get("ETag"))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+	assert.NotEqual(t, etag(t, "2\t=A1*3\n"), rec.Header().Get("ETag"), "a computed rendering is not the source entity")
 }
 
 func TestComputedPlainTSVAndCSV(t *testing.T) {
@@ -416,6 +417,104 @@ func TestUnreadableStoredDocumentIs500(t *testing.T) {
 	rec := do(h, http.MethodGet, "/d.tsvt", "", nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Contains(t, rec.Body.String(), "internal")
+}
+
+// TestReferenceIsReadOnly pins that a reference URL cannot mutate: accepting
+// it would let a cell address replace or delete the whole document.
+func TestReferenceIsReadOnly(t *testing.T) {
+	for _, method := range []string{http.MethodPut, http.MethodPost, http.MethodDelete} {
+		h := newHandler(t, map[string]string{"a.tsvt": "1\t2\n"}, api.WithComputePlane)
+		rec := do(h, method, "/a.tsvt!A1", "setCell\tA1\t9\n", map[string]string{
+			"Content-Type": api.TypeEdits, "If-Match": etag(t, "1\t2\n"),
+		})
+		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code, method)
+		still := do(h, http.MethodGet, "/a.tsvt", "", nil)
+		assert.Equal(t, "1\t2\n", still.Body.String(), method+" left the document untouched")
+	}
+}
+
+// TestComputedSpanIsBoundedByTheGrid pins that a far reference renders the
+// grid's tail once instead of materializing every addressable cell — one GET
+// must not be able to exhaust the server.
+func TestComputedSpanIsBoundedByTheGrid(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\t2\n3\t4\n"}, api.WithComputePlane)
+	rec := do(h, http.MethodGet, "/a.tsvt!A1:B9223372036854775806", "", nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "1\t2\n3\t4\n", rec.Body.String())
+}
+
+func TestComputedSpanBeyondTheGridStillRendersOneCell(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\n"}, api.WithComputePlane)
+	rec := do(h, http.MethodGet, "/a.tsvt!E9", "", nil)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "\n", rec.Body.String())
+}
+
+// TestRepresentationsCarryDistinctValidators pins the cache contract: the
+// source keeps the revision (mutations are conditioned on it) while each
+// computed rendering gets its own tag, and Vary states the axis.
+func TestRepresentationsCarryDistinctValidators(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\t2\n3\t=A1+B1\n"}, api.WithComputePlane)
+	source := do(h, http.MethodGet, "/a.tsvt", "", map[string]string{"Accept": api.TypeDoc})
+	csv := do(h, http.MethodGet, "/a.tsvt", "", map[string]string{"Accept": "text/csv"})
+	sheet := do(h, http.MethodGet, "/a.tsvt", "", map[string]string{"Accept": api.TypeSheet})
+	assert.Equal(t, etag(t, "1\t2\n3\t=A1+B1\n"), source.Header().Get("ETag"), "If-Match keeps working")
+	assert.NotEqual(t, source.Header().Get("ETag"), csv.Header().Get("ETag"))
+	assert.NotEqual(t, csv.Header().Get("ETag"), sheet.Header().Get("ETag"))
+	for _, rec := range []*httptest.ResponseRecorder{source, csv, sheet} {
+		assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+	}
+}
+
+func TestVolatileComputedBodyCarriesNoStrongValidator(t *testing.T) {
+	h := newHandler(t, map[string]string{"v.tsvt": "=random()|volatile\n"}, api.WithComputePlane)
+	rec := do(h, http.MethodGet, "/v.tsvt", "", map[string]string{"Accept": "text/csv"})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, rec.Header().Get("ETag"), "a body that varies within one revision is not an entity")
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
+func TestIdempotencyKeyRefusesADifferentBatch(t *testing.T) {
+	h := newHandler(t, map[string]string{"k.tsvt": "1\t2\n"}, api.DocumentPlaneOnly)
+	first := do(h, http.MethodPost, "/k.tsvt", "setCell\tA1\tFIRST\n", map[string]string{
+		"Content-Type": api.TypeEdits, "If-Match": etag(t, "1\t2\n"), "Idempotency-Key": "k1",
+	})
+	require.Equal(t, http.StatusNoContent, first.Code)
+	second := do(h, http.MethodPost, "/k.tsvt", "setCell\tB1\tSECOND\n", map[string]string{
+		"Content-Type": api.TypeEdits, "If-Match": etag(t, "FIRST\t2\n"), "Idempotency-Key": "k1",
+	})
+	assert.Equal(
+		t,
+		http.StatusUnprocessableEntity,
+		second.Code,
+		"a reused key with a new batch is refused, never silently dropped",
+	)
+	got := do(h, http.MethodGet, "/k.tsvt", "", nil)
+	assert.Equal(t, "FIRST\t2\n", got.Body.String())
+}
+
+func TestIdempotencyKeyIsScopedToItsDocument(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\n", "b.tsvt": "1\n"}, api.DocumentPlaneOnly)
+	header := map[string]string{"Content-Type": api.TypeEdits, "If-Match": etag(t, "1\n"), "Idempotency-Key": "shared"}
+	require.Equal(t, http.StatusNoContent, do(h, http.MethodPost, "/a.tsvt", "setCell\tA1\t2\n", header).Code)
+	require.Equal(t, http.StatusNoContent, do(h, http.MethodPost, "/b.tsvt", "setCell\tA1\t2\n", header).Code)
+	got := do(h, http.MethodGet, "/b.tsvt", "", nil)
+	assert.Equal(t, "2\n", got.Body.String(), "the second document was really edited, not replayed")
+}
+
+func TestEscapingSymlinkIs404(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "secret.tsvt")
+	require.NoError(t, os.WriteFile(outside, []byte("secret\n"), 0o600))
+	dir := t.TempDir()
+	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "link.tsvt")))
+	st, err := store.Open(store.RootDir(dir), tsvsheet.DefaultLimits())
+	require.NoError(t, err)
+	h := api.NewHandler(api.Config{
+		Store: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: api.DocumentPlaneOnly, Clock: fixedClock,
+	})
+	rec := do(h, http.MethodGet, "/link.tsvt", "", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "secret")
 }
 
 // sseSession is one live event-stream connection.

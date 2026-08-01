@@ -63,8 +63,8 @@ func (s refSpan) shapeOf() shape {
 }
 
 // typeOf is the vendor media type serving the shape.
-func (s shape) typeOf() string {
-	return map[shape]string{
+func (s shape) typeOf() mediaType {
+	return map[shape]mediaType{
 		shapeCell: TypeCell, shapeRow: TypeRow, shapeColumn: TypeColumn, shapeRange: TypeRange,
 	}[s]
 }
@@ -81,8 +81,11 @@ func valueAt(grid tsvsheet.Grid, row, col gridIndex) string {
 }
 
 // renderSpan serializes the span's computed values as a TSV fragment: rows
-// tab-joined, one per line.
+// tab-joined, one per line. The span is clipped to the grid first (see
+// clipped), so the body a request can ask for is bounded by the document, not
+// by the addresses the client wrote.
 func renderSpan(grid tsvsheet.Grid, span refSpan) string {
+	span = clipped(span, grid)
 	var b strings.Builder
 	for row := span.from.Row; row <= span.to.Row; row++ {
 		cells := make([]string, 0, span.to.Col-span.from.Col+1)
@@ -93,6 +96,25 @@ func renderSpan(grid tsvsheet.Grid, span refSpan) string {
 		_, _ = b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// clipped bounds a span's far corner by the grid's own extent, so a reference
+// naming a far address renders the empty tail once rather than materializing
+// every addressable cell between. A span that starts beyond the grid keeps its
+// origin, so a single out-of-extent cell still renders as one empty value.
+func clipped(span refSpan, grid tsvsheet.Grid) refSpan {
+	span.to.Row = min(span.to.Row, max(span.from.Row, len(grid)-1))
+	span.to.Col = min(span.to.Col, max(span.from.Col, widestRow(grid)-1))
+	return span
+}
+
+// widestRow is the column count of the grid's widest row.
+func widestRow(grid tsvsheet.Grid) int {
+	widest := 0
+	for _, row := range grid {
+		widest = max(widest, len(row))
+	}
+	return widest
 }
 
 // renderGridTSV serializes a whole computed grid as TSV.

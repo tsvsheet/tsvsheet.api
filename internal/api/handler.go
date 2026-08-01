@@ -6,6 +6,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -73,6 +75,13 @@ func (handler Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // route dispatches by method.
 func (handler Handler) route(w http.ResponseWriter, r *http.Request, doc store.DocPath, ref string) {
+	// A reference names a computed projection, which only a read can serve.
+	// Accepting it on a mutation would let a cell URL replace or delete the
+	// whole document, so it is refused rather than silently ignored.
+	if ref != "" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeProblem(w, http.StatusMethodNotAllowed, problemBadRequest, "a reference is read-only")
+		return
+	}
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 		handler.get(w, r, doc, ref)
@@ -151,7 +160,7 @@ func (handler Handler) feed(w http.ResponseWriter, r *http.Request, doc store.Do
 // answered with source bytes — without the compute plane it is 406.
 func (handler Handler) document(w http.ResponseWriter, r *http.Request, snap store.Snapshot, accept acceptSet) {
 	if accept.has(TypeDoc) || (accept.wildcard() && !accept.hasAny(TypeSheet, TypeTSV, TypeCSV)) {
-		handler.body(w, r, TypeDoc, snap.Rev, string(snap.Text))
+		handler.body(w, r, TypeDoc, snap, string(snap.Text))
 		return
 	}
 	if !accept.hasAny(TypeSheet, TypeTSV, TypeCSV) || handler.config.ComputeEnabled == DocumentPlaneOnly {
@@ -161,11 +170,11 @@ func (handler Handler) document(w http.ResponseWriter, r *http.Request, snap sto
 	grid := handler.computedGrid(snap)
 	switch {
 	case accept.has(TypeSheet):
-		handler.body(w, r, TypeSheet, snap.Rev, renderGridTSV(grid))
+		handler.body(w, r, TypeSheet, snap, renderGridTSV(grid))
 	case accept.has(TypeTSV):
-		handler.body(w, r, TypeTSV, snap.Rev, renderGridTSV(grid))
+		handler.body(w, r, TypeTSV, snap, renderGridTSV(grid))
 	default:
-		handler.body(w, r, TypeCSV, snap.Rev, renderGridCSV(grid))
+		handler.body(w, r, TypeCSV, snap, renderGridCSV(grid))
 	}
 }
 
@@ -181,15 +190,52 @@ func (handler Handler) computedRef(w http.ResponseWriter, snap store.Snapshot, r
 		return
 	}
 	served := span.shapeOf().typeOf()
-	if !accept.wildcard() && !accept.has(served) {
-		detail := problemDetail("reference shape serves " + served)
+	if !accept.wildcard() && !accept.has(string(served)) {
+		detail := problemDetail("reference shape serves " + string(served))
 		writeProblem(w, http.StatusNotAcceptable, problemNotAcceptable, detail)
 		return
 	}
-	w.Header().Set("Content-Type", served)
-	w.Header().Set("ETag", quote(snap.Rev))
+	w.Header().Set("Content-Type", string(served))
+	setValidator(w, snap, served)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, renderSpan(handler.computedGrid(snap), span))
+}
+
+// mediaType is a response representation's media type.
+type mediaType string
+
+// setValidator writes the caching headers for one representation.
+//
+// One URL serves the source and several computed renderings, so `Vary: Accept`
+// is mandatory: without it a shared cache keyed on the URL alone could hand a
+// values client the source body, defeating in one hop the source/computed rule
+// the handler enforces in-process. The source keeps the document revision as
+// its tag — mutations are conditioned on exactly that value — while each
+// computed rendering gets a tag derived from the revision and its media type,
+// so no two representations are ever interchangeable to a cache. A volatile
+// sheet's computed body may differ between two reads of one revision, so it
+// carries no strong validator and is not stored at all.
+func setValidator(w http.ResponseWriter, snap store.Snapshot, served mediaType) {
+	w.Header().Set("Vary", "Accept")
+	if served == TypeDoc {
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("ETag", quote(snap.Rev))
+		return
+	}
+	if snap.Doc.Sheet().IsVolatile() {
+		w.Header().Set("Cache-Control", "no-store")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("ETag", representationTag(snap.Rev, served))
+}
+
+// representationTag is the strong validator for one revision rendered as one
+// media type — distinct per representation, so a cache can never substitute
+// one for another.
+func representationTag(rev tsvsheet.RevisionHex, served mediaType) string {
+	sum := sha256.Sum256([]byte(string(rev) + "\x00" + string(served)))
+	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
 // computedGrid evaluates a snapshot at the configured clock.
@@ -201,12 +247,12 @@ func (handler Handler) computedGrid(snap store.Snapshot) tsvsheet.Grid {
 func (handler Handler) body(
 	w http.ResponseWriter,
 	r *http.Request,
-	mediaType string,
-	rev tsvsheet.RevisionHex,
+	served mediaType,
+	snap store.Snapshot,
 	text string,
 ) {
-	w.Header().Set("Content-Type", mediaType)
-	w.Header().Set("ETag", quote(rev))
+	w.Header().Set("Content-Type", string(served))
+	setValidator(w, snap, served)
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {
 		_, _ = io.WriteString(w, text)
@@ -273,11 +319,11 @@ func (handler Handler) post(w http.ResponseWriter, r *http.Request, doc store.Do
 		writeProblem(w, status, problemOf(status), problemDetail(err.Error()))
 		return
 	}
-	if handler.replayed(w, r, doc) {
-		return
-	}
 	body, ok := readBody(w, r)
 	if !ok {
+		return
+	}
+	if handler.replayed(w, r, doc, body) {
 		return
 	}
 	handler.apply(w, r, doc, body, rev)
@@ -301,7 +347,7 @@ func (handler Handler) apply(
 		handler.writeError(w, err)
 		return
 	}
-	handler.remember(r, doc, applied.New.Rev)
+	handler.remember(r, doc, applied.New.Rev, body)
 	handler.announce(doc, applied, body)
 	w.Header().Set("ETag", quote(applied.New.Rev))
 	w.WriteHeader(http.StatusNoContent)
@@ -419,12 +465,19 @@ func splitDocRef(urlPath requestPath) (store.DocPath, string) {
 	return store.DocPath(doc), ref
 }
 
+// replayOutcome is what one Idempotency-Key produced: the revision it left
+// behind and a digest of the batch it was used for.
+type replayOutcome struct {
+	rev  tsvsheet.RevisionHex
+	body [sha256.Size]byte
+}
+
 // replayCache remembers each Idempotency-Key's outcome so a retried POST
 // returns its original result instead of re-applying (or failing a stale
 // precondition). Bounded: when full, the cache resets — a replay after that
 // simply re-runs the normal precondition path.
 type replayCache struct {
-	seen map[string]tsvsheet.RevisionHex
+	seen map[string]replayOutcome
 	mu   sync.Mutex
 }
 
@@ -432,27 +485,52 @@ type replayCache struct {
 const replayCap = 1024
 
 // newReplayCache builds an empty cache.
-func newReplayCache() *replayCache { return &replayCache{seen: map[string]tsvsheet.RevisionHex{}} }
+func newReplayCache() *replayCache { return &replayCache{seen: map[string]replayOutcome{}} }
 
-// replayed answers a remembered key with its original outcome.
-func (handler Handler) replayed(w http.ResponseWriter, r *http.Request, doc store.DocPath) bool {
+// replayed answers a remembered key with its original outcome, or refuses the
+// key when it was first used for a different batch. A replay must be a repeat
+// of the same request: answering a *new* batch with an old result would drop
+// the edit and report success, which the client cannot detect.
+func (handler Handler) replayed(w http.ResponseWriter, r *http.Request, doc store.DocPath, body []byte) bool {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		return false
 	}
 	handler.replay.mu.Lock()
-	rev, ok := handler.replay.seen[string(doc)+"\x00"+key]
+	prior, ok := handler.replay.seen[replayKey(doc, idempotencyKey(key))]
 	handler.replay.mu.Unlock()
 	if !ok {
 		return false
 	}
-	w.Header().Set("ETag", quote(rev))
+	if prior.body != bodyDigest(body) {
+		writeProblem(
+			w,
+			http.StatusUnprocessableEntity,
+			problemBadRequest,
+			"idempotency key reused for a different batch",
+		)
+		return true
+	}
+	w.Header().Set("ETag", quote(prior.rev))
 	w.WriteHeader(http.StatusNoContent)
 	return true
 }
 
+// idempotencyKey is a client-supplied retry key.
+type idempotencyKey string
+
+// replayKey scopes a key to its document, so one client's key on one sheet can
+// never answer a request against another.
+func replayKey(doc store.DocPath, key idempotencyKey) string {
+	return string(doc) + "\x00" + string(key)
+}
+
+// bodyDigest content-addresses a request body, so a reused key is checked
+// against what it was first used for without retaining the batch.
+func bodyDigest(body []byte) [sha256.Size]byte { return sha256.Sum256(body) }
+
 // remember records a successful application under its Idempotency-Key.
-func (handler Handler) remember(r *http.Request, doc store.DocPath, rev tsvsheet.RevisionHex) {
+func (handler Handler) remember(r *http.Request, doc store.DocPath, rev tsvsheet.RevisionHex, body []byte) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		return
@@ -460,7 +538,7 @@ func (handler Handler) remember(r *http.Request, doc store.DocPath, rev tsvsheet
 	handler.replay.mu.Lock()
 	defer handler.replay.mu.Unlock()
 	if len(handler.replay.seen) >= replayCap {
-		handler.replay.seen = map[string]tsvsheet.RevisionHex{}
+		handler.replay.seen = map[string]replayOutcome{}
 	}
-	handler.replay.seen[string(doc)+"\x00"+key] = rev
+	handler.replay.seen[replayKey(doc, idempotencyKey(key))] = replayOutcome{rev: rev, body: bodyDigest(body)}
 }

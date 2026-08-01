@@ -23,15 +23,37 @@ type feedEvent struct {
 // reset event instead.
 const ringCap = 256
 
+// ringBytes bounds the same journal by payload size. A count alone is not a
+// bound: an event carries the request body it came from, so 256 batches at the
+// body limit would pin a gigabyte per document and hand all of it to the next
+// subscriber. The oldest events are dropped until the retained payload fits,
+// and a client whose resume point went with them gets a reset.
+const ringBytes journalBytes = 1 << 20
+
+// journalBytes is a retained-payload total.
+type journalBytes int
+
 // subCap bounds a subscriber's buffer; a subscriber that cannot drain is
 // dropped (its channel closed) and recovers by reconnecting with replay.
 const subCap = 16
 
 // docFeed is one document's live feed state.
 type docFeed struct {
-	subs map[chan feedEvent]struct{}
-	ring []feedEvent
-	seq  int64
+	subs  map[chan feedEvent]struct{}
+	ring  []feedEvent
+	seq   int64
+	bytes journalBytes
+}
+
+// trimJournal returns the journal reduced to within both bounds, with the
+// payload total it now carries. The newest event is always retained, however
+// large, so a live subscriber still sees the change that just happened.
+func trimJournal(ring []feedEvent, bytes journalBytes) ([]feedEvent, journalBytes) {
+	for len(ring) > 1 && (len(ring) > ringCap || bytes > ringBytes) {
+		bytes -= journalBytes(len(ring[0].data))
+		ring = ring[1:]
+	}
+	return ring, bytes
 }
 
 // hub fans applied changes out to event-stream subscribers, retaining a
@@ -65,10 +87,7 @@ func (h *hub) broadcast(doc store.DocPath, name, data string) {
 	feed := h.feedOf(doc)
 	feed.seq++
 	event := feedEvent{id: feed.seq, name: name, data: data}
-	feed.ring = append(feed.ring, event)
-	if len(feed.ring) > ringCap {
-		feed.ring = feed.ring[len(feed.ring)-ringCap:]
-	}
+	feed.ring, feed.bytes = trimJournal(append(feed.ring, event), feed.bytes+journalBytes(len(event.data)))
 	for ch := range feed.subs {
 		select {
 		case ch <- event:
@@ -97,10 +116,16 @@ func (h *hub) subscribe(doc store.DocPath, lastID int64) subscription {
 	ch := make(chan feedEvent, subCap)
 	feed.subs[ch] = struct{}{}
 	cancel := func() { h.unsubscribe(doc, ch) }
+	// No resume point means a fresh subscriber: it has just fetched the
+	// document, so replaying the backlog would hand it a history it already
+	// has, at the journal's full retained size.
+	if lastID == 0 {
+		return subscription{live: ch, cancel: cancel}
+	}
 	// A resume point below the retained window or beyond the current sequence
 	// (a restarted server) cannot be replayed — the client must refetch.
 	floor := feed.seq - int64(len(feed.ring))
-	if lastID > 0 && (lastID < floor || lastID > feed.seq) {
+	if lastID < floor || lastID > feed.seq {
 		return subscription{live: ch, cancel: cancel, isReset: true}
 	}
 	var replay []feedEvent

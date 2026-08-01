@@ -32,6 +32,45 @@ func TestHubRingOverflowForcesReset(t *testing.T) {
 	assert.Len(t, tail.replay, 5)
 }
 
+// TestHubFreshSubscriberGetsNoBacklog pins that a subscriber with no resume
+// point receives only what happens next: it has just fetched the document, so
+// replaying the retained journal would hand it history it already has.
+func TestHubFreshSubscriberGetsNoBacklog(t *testing.T) {
+	h := newHub()
+	for i := range 5 {
+		h.broadcast("doc", eventChanged, "n"+strconv.Itoa(i))
+	}
+	sub := h.subscribe("doc", 0)
+	defer sub.cancel()
+	assert.Empty(t, sub.replay)
+	assert.False(t, sub.isReset)
+}
+
+// TestHubJournalIsBoundedByBytes pins the size bound: an event carries the
+// request body it came from, so a count-only bound would let a few large
+// batches pin the journal and flood the next subscriber.
+func TestHubJournalIsBoundedByBytes(t *testing.T) {
+	h := newHub()
+	big := strings.Repeat("x", int(ringBytes)/2)
+	for range 10 {
+		h.broadcast("doc", eventChanged, big)
+	}
+	h.mu.Lock()
+	retained, events := h.docs["doc"].bytes, len(h.docs["doc"].ring)
+	h.mu.Unlock()
+	assert.LessOrEqual(t, int(retained), int(ringBytes), "the journal stays within its byte bound")
+	assert.Less(t, events, 10, "the oldest events were dropped")
+}
+
+func TestHubAlwaysRetainsTheNewestEvent(t *testing.T) {
+	h := newHub()
+	h.broadcast("doc", eventChanged, strings.Repeat("x", int(ringBytes)*2))
+	h.mu.Lock()
+	events := len(h.docs["doc"].ring)
+	h.mu.Unlock()
+	assert.Equal(t, 1, events, "an oversize event is still the one a live subscriber needs")
+}
+
 func TestHubResumeBeyondSequenceForcesReset(t *testing.T) {
 	h := newHub()
 	h.broadcast("doc", eventChanged, "x")
@@ -85,17 +124,17 @@ func TestSplitDataLinesKeepsUnterminatedTail(t *testing.T) {
 func TestReplayCacheResetsWhenFull(t *testing.T) {
 	handler := NewHandler(Config{})
 	for i := range replayCap {
-		handler.replay.seen["doc\x00k"+strconv.Itoa(i)] = "r"
+		handler.replay.seen["doc\x00k"+strconv.Itoa(i)] = replayOutcome{rev: "r"}
 	}
 	req := httptest.NewRequest(http.MethodPost, "/doc", nil)
 	req.Header.Set("Idempotency-Key", "fresh")
-	handler.remember(req, "doc", tsvsheet.RevisionHex("new"))
+	handler.remember(req, "doc", tsvsheet.RevisionHex("new"), []byte("body"))
 	assert.Len(t, handler.replay.seen, 1)
 }
 
 func TestRememberWithoutKeyIsNoOp(t *testing.T) {
 	handler := NewHandler(Config{})
-	handler.remember(httptest.NewRequest(http.MethodPost, "/doc", nil), "doc", "r")
+	handler.remember(httptest.NewRequest(http.MethodPost, "/doc", nil), "doc", "r", []byte("body"))
 	assert.Empty(t, handler.replay.seen)
 }
 

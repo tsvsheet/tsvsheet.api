@@ -9,6 +9,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -63,15 +65,23 @@ var (
 
 func main() { osExit(run(os.Args)) }
 
-// run builds and executes the CLI, returning the process exit code.
+// run builds and executes the CLI, returning the process exit code. A refusal
+// is reported on the error stream before exiting: a bare non-zero status
+// leaves an operator guessing whether the bind, the root, or the flags were
+// the problem.
 func run(args []string) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	if err := createApp().Run(ctx, args); err != nil {
+		_, _ = fmt.Fprintln(stderr, name+": "+err.Error())
 		return 1
 	}
 	return 0
 }
+
+// stderr is the diagnostics stream, indirected so a test can read what an
+// operator would see.
+var stderr io.Writer = os.Stderr
 
 // createApp constructs the CLI: a single root command that serves.
 func createApp() *cli.Command {
