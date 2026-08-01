@@ -15,6 +15,8 @@ package document
 
 import (
 	"context"
+	"path"
+	"strings"
 
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 )
@@ -64,14 +66,21 @@ func (e Expect) Revision() (tsvsheet.RevisionHex, Created) {
 }
 
 // Port is the document plane: read a document, apply an edits batch to it,
-// replace or create it whole, remove it. Every mutation is conditioned, so two
-// writers cannot silently overwrite one another whichever implementation is in
-// hand.
+// replace or create it whole, remove it. Every mutation is conditioned, so a
+// second writer is refused rather than silently overwriting the first,
+// whichever implementation is in hand. See the conformance suite, which
+// asserts that for both.
 //
 // Implementations return this package's sentinel errors (ErrMissing,
-// ErrPrecondition, ErrExists, ErrPath) and the engine's own for a refused
-// batch (tsvsheet.ErrEditsBase, tsvsheet.ErrEditsApply, tsvsheet.ErrSyntax),
-// so a caller matches one set of errors regardless of where the document is.
+// ErrPrecondition, ErrExists, ErrSyntax — a refused path is ErrMissing
+// wrapping ErrPath) and the engine's own for a refused batch
+// (tsvsheet.ErrEditsBase, tsvsheet.ErrEditsApply), so a caller matches one set
+// of errors regardless of where the document is.
+//
+// Liveness is deliberately absent: the embedded implementation has no feed,
+// and an interface method every caller must handle as "unsupported" is worse
+// than a capability that is simply not here yet. It arrives as its own
+// type-asserted interface when something implements it.
 type Port interface {
 	Get(ctx context.Context, doc DocPath) (Snapshot, error)
 	Apply(ctx context.Context, doc DocPath, batch tsvsheet.Edits, expect tsvsheet.RevisionHex) (Applied, error)
@@ -79,22 +88,33 @@ type Port interface {
 	Delete(ctx context.Context, doc DocPath, expect tsvsheet.RevisionHex) error
 }
 
-// Change is one observed document change: the batch that caused it and the
-// revisions it moved between.
-type Change struct {
-	Old   tsvsheet.RevisionHex
-	New   tsvsheet.RevisionHex
-	Batch tsvsheet.Edits
+// Validate refuses a path that is not a clean relative path within a port's
+// namespace, or that carries the HTTP binding's reserved "!" reference marker.
+//
+// The rule lives here rather than in an implementation because both adapters
+// must apply it identically. An embedded port would otherwise refuse what a
+// client silently rewrites: URL joining cleans "..", so an unvalidated
+// traversal reaches a different document instead of being refused — the
+// adapters would disagree about what a caller even addressed.
+//
+// A refusal is indistinguishable from a missing document on purpose. Whether a
+// refused name exists is not a caller's business, and the HTTP binding answers
+// 404 for both, so an embedded caller must see what a remote one sees; the
+// specific cause rides along for a local caller that wants it.
+func Validate(p DocPath) error {
+	s := string(p)
+	clean := path.Clean(s)
+	ok := s != "" && clean == s && clean != "." && !path.IsAbs(s) &&
+		clean != ".." && !strings.HasPrefix(clean, "../") && !strings.Contains(s, "!")
+	if !ok {
+		return ErrMissing.With(ErrPath, "path", s)
+	}
+	return nil
 }
 
-// Watcher is the optional liveness capability. It is a separate interface a
-// caller type-asserts rather than a Port method, because an implementation
-// that cannot observe changes must not advertise that it can: an embedded port
-// over a local file has no feed, and answering "unsupported" from a method
-// every caller must handle is worse than the capability being absent from the
-// type.
-type Watcher interface {
-	// Watch delivers changes until the context is cancelled or the stream
-	// ends. The returned channel is closed when no further change will arrive.
-	Watch(ctx context.Context, doc DocPath) (<-chan Change, error)
-}
+// IsZero reports whether the precondition was built by neither ExpectRev nor
+// ExpectAbsent. A zero value states no expectation at all, and a mutation
+// refuses it: writing without a precondition is the silent overwrite the plane
+// exists to prevent. See TestExpectStatesOneRequirement and
+// TestConformanceZeroPreconditionIsRefused.
+func (e Expect) IsZero() bool { return e.rev == "" && !e.isAbsent }

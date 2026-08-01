@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
+
+	"github.com/tsvsheet/tsvsheet.api/internal/constants"
 )
 
 // withServeStub swaps the blocking serve for a capture, restoring it after.
@@ -142,4 +144,15 @@ func TestMainUsesOSExit(t *testing.T) {
 	os.Args = []string{name, "--root", docRoot(t)}
 	main()
 	assert.Equal(t, 0, code)
+}
+
+// TestBindRefusalsEmitTheirSentinels pins the errors this command emits when
+// it will not listen, so an operator (and a test) can tell a malformed address
+// from an exposed one.
+func TestBindRefusalsEmitTheirSentinels(t *testing.T) {
+	assert.ErrorIs(t, requireLoopback("no-port"), constants.ErrListen)
+	assert.ErrorIs(t, requireLoopback("0.0.0.0:8787"), constants.ErrNotLoopback)
+	assert.ErrorIs(t, requireLoopback("example.com:80"), constants.ErrNotLoopback)
+	assert.NoError(t, requireLoopback("127.0.0.1:0"))
+	assert.NoError(t, requireLoopback("localhost:0"))
 }

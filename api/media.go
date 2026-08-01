@@ -4,7 +4,9 @@ import "strings"
 
 // The +tsv media-type family the API speaks. TypeDoc and TypeEdits are the
 // document plane's own; the §9 vendor types (TypeSheet through TypeRange) mean
-// computed values, exactly as the language's IMPORT* builtins request them.
+// computed values, in the shapes the language's IMPORT* builtins request —
+// TestComputedRangeRowColumnShapes and TestGetValuesAcceptWithoutComputeIs406
+// assert the shapes and the source-versus-values refusal.
 const (
 	TypeDoc     = "application/vnd.tsvsheet.doc+tsv"
 	TypeEdits   = "application/vnd.tsvsheet.edits+tsv"

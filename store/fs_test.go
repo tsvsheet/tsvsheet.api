@@ -6,13 +6,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 
-	"github.com/tsvsheet/tsvsheet.api/internal/constants"
+	"github.com/tsvsheet/tsvsheet.api/document"
 )
 
 // seeded returns a store whose root holds a.tsvt with "1\n".
@@ -48,7 +49,7 @@ func TestWriteFailureLeavesDocumentIntact(t *testing.T) {
 	t.Cleanup(func() { writeFileIn = prev })
 	_, err := st.Apply(t.Context(), "a.tsvt", batchOf(t, "setCell\tA1\t2\n"), revOf(t, "1\n"))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, constants.ErrDocWrite)
+	assert.ErrorIs(t, err, ErrWrite)
 	saved, readErr := os.ReadFile(filepath.Join(dir, "a.tsvt"))
 	require.NoError(t, readErr)
 	assert.Equal(t, "1\n", string(saved))
@@ -59,9 +60,9 @@ func TestRenameFailureRemovesStagingAndLeavesDocument(t *testing.T) {
 	prev := renameIn
 	renameIn = func(*os.Root, string, string) error { return errors.New("cross-device") }
 	t.Cleanup(func() { renameIn = prev })
-	_, _, err := st.Put(t.Context(), "a.tsvt", []byte("2\n"), ExpectRev(revOf(t, "1\n")))
+	_, _, err := st.Put(t.Context(), "a.tsvt", []byte("2\n"), document.ExpectRev(revOf(t, "1\n")))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, constants.ErrDocWrite)
+	assert.ErrorIs(t, err, ErrWrite)
 	saved, readErr := os.ReadFile(filepath.Join(dir, "a.tsvt"))
 	require.NoError(t, readErr)
 	assert.Equal(t, "1\n", string(saved))
@@ -77,7 +78,7 @@ func TestRemoveFailureSurfacesAsWriteError(t *testing.T) {
 	t.Cleanup(func() { removeIn = prev })
 	err := st.Delete(t.Context(), "a.tsvt", revOf(t, "1\n"))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, constants.ErrDocWrite)
+	assert.ErrorIs(t, err, ErrWrite)
 }
 
 func TestPathThroughAFileIsMissingThenUnwritable(t *testing.T) {
@@ -89,10 +90,10 @@ func TestPathThroughAFileIsMissingThenUnwritable(t *testing.T) {
 	require.NoError(t, err)
 	_, getErr := st.Get(t.Context(), "sub/x.tsvt")
 	require.Error(t, getErr)
-	assert.ErrorIs(t, getErr, constants.ErrDocMissing)
-	_, _, putErr := st.Put(t.Context(), "sub/x.tsvt", []byte("1\n"), ExpectAbsent())
+	assert.ErrorIs(t, getErr, document.ErrMissing)
+	_, _, putErr := st.Put(t.Context(), "sub/x.tsvt", []byte("1\n"), document.ExpectAbsent())
 	require.Error(t, putErr)
-	assert.ErrorIs(t, putErr, constants.ErrDocWrite)
+	assert.ErrorIs(t, putErr, ErrWrite)
 }
 
 // TestEscapingSymlinkIsMissingNotAServerFault pins that a client-named path
@@ -107,7 +108,7 @@ func TestEscapingSymlinkIsMissingNotAServerFault(t *testing.T) {
 	require.NoError(t, err)
 	_, getErr := st.Get(t.Context(), "link.tsvt")
 	require.Error(t, getErr)
-	assert.ErrorIs(t, getErr, constants.ErrDocMissing)
+	assert.ErrorIs(t, getErr, document.ErrMissing)
 	assert.NotContains(t, errText(getErr), "secret")
 }
 
@@ -115,7 +116,7 @@ func TestInvalidNameIsMissing(t *testing.T) {
 	st, _ := seeded(t)
 	_, err := st.Get(t.Context(), DocPath("a.tsvt\x00.png"))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, constants.ErrDocMissing)
+	assert.ErrorIs(t, err, document.ErrMissing)
 }
 
 func TestErrTextOfNilIsEmpty(t *testing.T) { assert.Empty(t, errText(nil)) }
@@ -127,9 +128,9 @@ func TestMkdirFailureSurfacesAsWriteError(t *testing.T) {
 	prev := mkdirIn
 	mkdirIn = func(*os.Root, string, os.FileMode) error { return errors.New("read-only fs") }
 	t.Cleanup(func() { mkdirIn = prev })
-	_, _, putErr := st.Put(t.Context(), "sub/x.tsvt", []byte("1\n"), ExpectAbsent())
+	_, _, putErr := st.Put(t.Context(), "sub/x.tsvt", []byte("1\n"), document.ExpectAbsent())
 	require.Error(t, putErr)
-	assert.ErrorIs(t, putErr, constants.ErrDocWrite)
+	assert.ErrorIs(t, putErr, ErrWrite)
 }
 
 func TestReadFailureOnDirectoryDocument(t *testing.T) {
@@ -139,7 +140,7 @@ func TestReadFailureOnDirectoryDocument(t *testing.T) {
 	require.NoError(t, err)
 	_, getErr := st.Get(t.Context(), "d.tsvt")
 	require.Error(t, getErr)
-	assert.ErrorIs(t, getErr, constants.ErrDocRead)
+	assert.ErrorIs(t, getErr, ErrRead)
 }
 
 func TestPutOverUnparsableExistingPropagatesParseError(t *testing.T) {
@@ -147,7 +148,28 @@ func TestPutOverUnparsableExistingPropagatesParseError(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.tsvt"), []byte("=(\n"), 0o600))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
-	_, _, putErr := st.Put(t.Context(), "bad.tsvt", []byte("1\n"), ExpectAbsent())
+	_, _, putErr := st.Put(t.Context(), "bad.tsvt", []byte("1\n"), document.ExpectAbsent())
 	require.Error(t, putErr)
-	assert.ErrorIs(t, putErr, constants.ErrDocParse)
+	assert.ErrorIs(t, putErr, ErrParse)
+}
+
+// TestRefusedNamesCarryTheirSyscallCause pins the two OS refusals this file
+// classifies as "not found": an escape and a name the kernel rejects. Both are
+// asserted through the syscall errors themselves, since neither is expressible
+// as a sentinel this package declares.
+func TestRefusedNamesCarryTheirSyscallCause(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub"), []byte("a file"), 0o600))
+	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
+	require.NoError(t, err)
+
+	_, notDir := st.Get(t.Context(), "sub/x.tsvt")
+	require.Error(t, notDir)
+	assert.ErrorIs(t, notDir, syscall.ENOTDIR, "a path through a file is ENOTDIR underneath")
+	assert.ErrorIs(t, notDir, document.ErrMissing, "and reads as missing to a caller")
+
+	_, invalid := st.Get(t.Context(), DocPath("a.tsvt\x00.png"))
+	require.Error(t, invalid)
+	assert.ErrorIs(t, invalid, syscall.EINVAL, "a NUL in a name is EINVAL underneath")
+	assert.ErrorIs(t, invalid, document.ErrMissing)
 }

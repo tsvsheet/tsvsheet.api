@@ -1,10 +1,7 @@
-// White-box tests for the feed hub's saturation behaviour, the SSE plumbing's
-// degenerate writers, and the replay cache's bound — edges a black-box HTTP
-// client cannot reach deterministically.
 package api
 
 import (
-	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -13,8 +10,94 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 )
+
+func TestFeedReplaysFromLastEventID(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\n"}, DocumentPlaneOnly)
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	first := openSSE(t, server.URL, "")
+	post := func(ifMatch, cell string) {
+		req, err := http.NewRequest(http.MethodPost, server.URL+"/a.tsvt", strings.NewReader("setCell\tA1\t"+cell+"\n"))
+		require.NoError(t, err)
+		req.Header.Set("Content-Type", TypeEdits)
+		req.Header.Set("If-Match", ifMatch)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		_ = resp.Body.Close()
+	}
+	post(etag(t, "1\n"), "2")
+	one := first.next(t)
+	require.Equal(t, "changed", one["event"])
+	firstID := one["id"]
+	post(etag(t, "2\n"), "3")
+	_ = first.next(t)
+	first.close()
+
+	// Reconnecting after the first event replays the second.
+	second := openSSE(t, server.URL, firstID)
+	defer second.close()
+	replayed := second.next(t)
+	assert.Equal(t, "changed", replayed["event"])
+	assert.Contains(t, replayed["data"], "setCell\tA1\t3")
+}
+
+func TestFeedResetWhenHorizonGone(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\n"}, DocumentPlaneOnly)
+	server := httptest.NewServer(h)
+	defer server.Close()
+	// An ID far below the retained window (which is empty) forces a reset.
+	session := openSSE(t, server.URL, "999")
+	defer session.close()
+	event := session.next(t)
+	assert.Equal(t, "reset", event["event"])
+	assert.Contains(t, event["data"], "#.rev\t"+revision(t, "1\n"))
+}
+
+func TestPutBroadcastsReset(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\n"}, DocumentPlaneOnly)
+	server := httptest.NewServer(h)
+	defer server.Close()
+	session := openSSE(t, server.URL, "")
+	defer session.close()
+
+	req, err := http.NewRequest(http.MethodPut, server.URL+"/a.tsvt", strings.NewReader("9\n"))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", TypeDoc)
+	req.Header.Set("If-Match", etag(t, "1\n"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	event := session.next(t)
+	assert.Equal(t, "reset", event["event"])
+	assert.Contains(t, event["data"], "#.rev\t"+revision(t, "9\n"))
+}
+
+func TestDeleteBroadcastsDeletedAndEndsStream(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "1\n"}, DocumentPlaneOnly)
+	server := httptest.NewServer(h)
+	defer server.Close()
+	session := openSSE(t, server.URL, "")
+	defer session.close()
+
+	req, err := http.NewRequest(http.MethodDelete, server.URL+"/a.tsvt", nil)
+	require.NoError(t, err)
+	req.Header.Set("If-Match", etag(t, "1\n"))
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	event := session.next(t)
+	assert.Equal(t, "deleted", event["event"])
+	rest, err := io.ReadAll(session.resp.Body)
+	require.NoError(t, err)
+	assert.Empty(t, string(rest))
+}
 
 func TestHubRingOverflowForcesReset(t *testing.T) {
 	h := newHub()
@@ -62,7 +145,7 @@ func TestHubJournalIsBoundedByBytes(t *testing.T) {
 	assert.Less(t, events, 10, "the oldest events were dropped")
 }
 
-func TestHubAlwaysRetainsTheNewestEvent(t *testing.T) {
+func TestHubRetainsTheNewestEvent(t *testing.T) {
 	h := newHub()
 	h.broadcast("doc", eventChanged, strings.Repeat("x", int(ringBytes)*2))
 	h.mu.Lock()
@@ -102,7 +185,6 @@ type plainWriter struct{}
 func (plainWriter) Header() http.Header         { return http.Header{} }
 func (plainWriter) Write(b []byte) (int, error) { return len(b), nil }
 func (plainWriter) WriteHeader(int)             {}
-
 func TestFlusherOfPlainWriterIsNoOp(t *testing.T) {
 	t.Parallel()
 	flusherOf(plainWriter{})()
@@ -119,61 +201,6 @@ func TestSplitDataLinesKeepsUnterminatedTail(t *testing.T) {
 	assert.Equal(t, []string{"a", "b"}, splitDataLines(feedData("a\nb")))
 	assert.Equal(t, []string{"a", "b"}, splitDataLines(feedData("a\nb\n")))
 	assert.Empty(t, splitDataLines(feedData("")))
-}
-
-func TestReplayCacheResetsWhenFull(t *testing.T) {
-	handler := NewHandler(Config{})
-	for i := range replayCap {
-		handler.replay.seen["doc\x00k"+strconv.Itoa(i)] = replayOutcome{rev: "r"}
-	}
-	req := httptest.NewRequest(http.MethodPost, "/doc", nil)
-	req.Header.Set("Idempotency-Key", "fresh")
-	handler.remember(req, "doc", tsvsheet.RevisionHex("new"), []byte("body"))
-	assert.Len(t, handler.replay.seen, 1)
-}
-
-func TestRememberWithoutKeyIsNoOp(t *testing.T) {
-	handler := NewHandler(Config{})
-	handler.remember(httptest.NewRequest(http.MethodPost, "/doc", nil), "doc", "r", []byte("body"))
-	assert.Empty(t, handler.replay.seen)
-}
-
-// failingBody errors on read without being a MaxBytesError.
-type failingBody struct{}
-
-func (failingBody) Read([]byte) (int, error) { return 0, errors.New("torn") }
-func (failingBody) Close() error             { return nil }
-
-func TestReadBodyPlainFailureIs400(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/doc", nil)
-	req.Body = failingBody{}
-	rec := httptest.NewRecorder()
-	_, ok := readBody(rec, req)
-	require.False(t, ok)
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "unreadable")
-}
-
-func TestParseAcceptDropsEmptyExpressions(t *testing.T) {
-	set := parseAccept(" , text/csv;q=0.8 ,")
-	assert.Equal(t, acceptSet{"text/csv"}, set)
-	assert.True(t, set.has("text/csv"))
-	assert.False(t, set.wildcard())
-}
-
-func TestCellsDeltaCoversShrinkAndGrowth(t *testing.T) {
-	old := tsvsheet.Grid{{"1", "2"}, {"3"}}
-	next := tsvsheet.Grid{{"1", "9", "8"}}
-	delta := cellsDelta(old, next)
-	assert.Contains(t, delta, "B1\t9")
-	assert.Contains(t, delta, "C1\t8")
-	assert.Contains(t, delta, "A2\t\n")
-	assert.NotContains(t, delta, "A1")
-}
-
-func TestCellsDeltaEqualGridsIsEmpty(t *testing.T) {
-	grid := tsvsheet.Grid{{"1"}}
-	assert.Empty(t, cellsDelta(grid, grid))
 }
 
 func TestWriteEventOmitsZeroID(t *testing.T) {

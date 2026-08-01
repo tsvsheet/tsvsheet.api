@@ -47,8 +47,10 @@ const (
 	shapeRange
 )
 
-// shapeOf classifies the span.
+// shapeOf classifies the span, normalized first so a reversed reference has
+// the shape its rectangle has.
 func (s refSpan) shapeOf() shape {
+	s = normalized(s)
 	oneRow, oneCol := s.from.Row == s.to.Row, s.from.Col == s.to.Col
 	switch {
 	case oneRow && oneCol:
@@ -98,14 +100,30 @@ func renderSpan(grid tsvsheet.Grid, span refSpan) string {
 	return b.String()
 }
 
-// clipped bounds a span's far corner by the grid's own extent, so a reference
-// naming a far address renders the empty tail once rather than materializing
-// every addressable cell between. A span that starts beyond the grid keeps its
-// origin, so a single out-of-extent cell still renders as one empty value.
+// clipped normalizes a span and bounds its far corner by the grid's own
+// extent, so a reference naming a far address renders the empty tail once
+// rather than materializing every addressable cell between. A span that starts
+// beyond the grid keeps its origin, so a single out-of-extent cell still
+// renders as one empty value.
+//
+// Normalizing first is what keeps a reversed reference (C1:A1) from producing
+// a negative extent — which is not merely an odd result but a panic in the
+// allocation that follows.
 func clipped(span refSpan, grid tsvsheet.Grid) refSpan {
+	span = normalized(span)
 	span.to.Row = min(span.to.Row, max(span.from.Row, len(grid)-1))
 	span.to.Col = min(span.to.Col, max(span.from.Col, widestRow(grid)-1))
 	return span
+}
+
+// normalized orders a span's corners, so from is the top-left whichever way
+// the reference was written. A1:C3 and C3:A1 name the same rectangle, as they
+// do in the language.
+func normalized(span refSpan) refSpan {
+	return refSpan{
+		from: tsvsheet.Address{Row: min(span.from.Row, span.to.Row), Col: min(span.from.Col, span.to.Col)},
+		to:   tsvsheet.Address{Row: max(span.from.Row, span.to.Row), Col: max(span.from.Col, span.to.Col)},
+	}
 }
 
 // widestRow is the column count of the grid's widest row.
