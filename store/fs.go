@@ -66,10 +66,8 @@ func (s *Store) check(p DocPath, expect Expect) (Created, error) {
 // write lands data at p atomically: staged in the same directory, then
 // renamed over the target, so an interrupted write never truncates a document.
 func (s *Store) write(p DocPath, data []byte) error {
-	if dir := path.Dir(string(p)); dir != "." {
-		if err := mkdirIn(s.root, dir, dirPerm); err != nil {
-			return ErrWrite.With(err, "path", string(p))
-		}
+	if err := s.ensureDir(p); err != nil {
+		return err
 	}
 	tmp := string(p) + tempSuffix
 	if err := writeFileIn(s.root, tmp, data, filePerm); err != nil {
@@ -82,18 +80,43 @@ func (s *Store) write(p DocPath, data []byte) error {
 	return nil
 }
 
+// ensureDir creates the document's parent directory when it has one.
+//
+// A directory the filesystem will not create is a client-named path that
+// resolves to nothing writable — the same judgement load makes for reads.
+// Reporting it as a server fault would blame the server and echo raw syscall
+// text back to whoever named the path. See
+// TestConformanceARefusedWritePathIsMissingNotAServerFault.
+func (s *Store) ensureDir(p DocPath) error {
+	dir := path.Dir(string(p))
+	if dir == "." {
+		return nil
+	}
+	err := mkdirIn(s.root, dir, dirPerm)
+	switch {
+	case err == nil:
+		return nil
+	case isRefusedPath(err):
+		return document.ErrMissing.With(document.ErrPath, "path", string(p))
+	default:
+		return ErrWrite.With(err, "path", string(p))
+	}
+}
+
 // snapshotOf canonicalizes a parsed document into its served state.
 func snapshotOf(doc tsvsheet.Document) Snapshot {
 	return Snapshot{Doc: doc, Text: doc.Text(), Rev: tsvsheet.Revision(doc)}
 }
 
 // isRefusedPath reports whether the error is os.Root's refusal to resolve a
-// name (an escape) or the OS refusing the name outright (an invalid byte).
+// name (an escape), the OS refusing the name outright (an invalid byte), or a
+// name with no place to exist because a component is not a directory. See
 // TestEscapingSymlinkIsMissingNotAServerFault and TestInvalidNameIsMissing
-// assert both, since neither is expressible as an exported sentinel.
+// assert these, since none is expressible as an exported sentinel.
 func isRefusedPath(err error) bool {
 	return errors.Is(err, fs.ErrInvalid) || errors.Is(err, syscall.EINVAL) ||
-		errors.Is(err, syscall.ENOTDIR) || strings.Contains(errText(err), escapeMarker)
+		errors.Is(err, syscall.ENOTDIR) || errors.Is(err, fs.ErrExist) ||
+		strings.Contains(errText(err), escapeMarker)
 }
 
 // escapeMarker is what os.Root reports when a symlink leaves the root; the

@@ -81,9 +81,10 @@ func TestRemoveFailureSurfacesAsWriteError(t *testing.T) {
 	assert.ErrorIs(t, err, ErrWrite)
 }
 
-func TestPathThroughAFileIsMissingThenUnwritable(t *testing.T) {
-	// "sub" is a file, so nothing can resolve at sub/x.tsvt: the read is a
-	// missing document (404 to a client), and the write refuses.
+func TestPathThroughAFileIsMissingBothWays(t *testing.T) {
+	// "sub" is a file, so nothing resolves at sub/x.tsvt: the read is a missing
+	// document, and so is the write — a client-named path that cannot exist is
+	// not a server fault.
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub"), []byte("a file"), 0o600))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
@@ -93,7 +94,7 @@ func TestPathThroughAFileIsMissingThenUnwritable(t *testing.T) {
 	assert.ErrorIs(t, getErr, document.ErrMissing)
 	_, _, putErr := st.Put(t.Context(), "sub/x.tsvt", []byte("1\n"), document.ExpectAbsent())
 	require.Error(t, putErr)
-	assert.ErrorIs(t, putErr, ErrWrite)
+	assert.ErrorIs(t, putErr, document.ErrMissing)
 }
 
 // TestEscapingSymlinkIsMissingNotAServerFault pins that a client-named path
@@ -168,7 +169,7 @@ func TestRefusedNamesCarryTheirSyscallCause(t *testing.T) {
 	assert.ErrorIs(t, notDir, syscall.ENOTDIR, "a path through a file is ENOTDIR underneath")
 	assert.ErrorIs(t, notDir, document.ErrMissing, "and reads as missing to a caller")
 
-	_, invalid := st.Get(t.Context(), DocPath("a.tsvt\x00.png"))
+	_, invalid := st.Get(t.Context(), DocPath("a\x00b.tsvt"))
 	require.Error(t, invalid)
 	assert.ErrorIs(t, invalid, syscall.EINVAL, "a NUL in a name is EINVAL underneath")
 	assert.ErrorIs(t, invalid, document.ErrMissing)

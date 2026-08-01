@@ -22,8 +22,8 @@ import (
 )
 
 // DocPath addresses a document within a port's namespace: a clean relative
-// path, no traversal, no "!" (reserved by the HTTP binding's reference
-// suffix).
+// path naming a .tsvt file, with no traversal and no "!" (reserved by the HTTP
+// binding's reference suffix).
 type DocPath string
 
 // Snapshot is one document state: the parsed document, its canonical bytes,
@@ -88,8 +88,15 @@ type Port interface {
 	Delete(ctx context.Context, doc DocPath, expect tsvsheet.RevisionHex) error
 }
 
-// Validate refuses a path that is not a clean relative path within a port's
-// namespace, or that carries the HTTP binding's reserved "!" reference marker.
+// Validate refuses a path that is not a clean relative .tsvt path within a
+// port's namespace, or that carries the HTTP binding's reserved "!" reference
+// marker.
+//
+// The extension is part of the rule, not a convention. A port is pointed at a
+// directory, and every file under it would otherwise be readable and
+// writable through the same requests — an operator who points one at a project
+// checkout would be serving its dotfiles and keys, not its spreadsheets. A
+// document plane for .tsvt files serves .tsvt files.
 //
 // The rule lives here rather than in an implementation because both adapters
 // must apply it identically. An embedded port would otherwise refuse what a
@@ -105,12 +112,17 @@ func Validate(p DocPath) error {
 	s := string(p)
 	clean := path.Clean(s)
 	ok := s != "" && clean == s && clean != "." && !path.IsAbs(s) &&
-		clean != ".." && !strings.HasPrefix(clean, "../") && !strings.Contains(s, "!")
+		clean != ".." && !strings.HasPrefix(clean, "../") && !strings.Contains(s, "!") &&
+		strings.HasSuffix(s, DocExtension) && s != DocExtension
 	if !ok {
 		return ErrMissing.With(ErrPath, "path", s)
 	}
 	return nil
 }
+
+// DocExtension is the file extension a document plane serves. It is the
+// language's own: a .tsvt file IS the spreadsheet.
+const DocExtension = ".tsvt"
 
 // IsZero reports whether the precondition was built by neither ExpectRev nor
 // ExpectAbsent. A zero value states no expectation at all, and a mutation

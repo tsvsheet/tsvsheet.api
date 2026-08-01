@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,6 +12,7 @@ import (
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 
 	"github.com/tsvsheet/tsvsheet.api/document"
+	"github.com/tsvsheet/tsvsheet.api/store"
 )
 
 func TestComputedWholeGrid(t *testing.T) {
@@ -181,4 +184,35 @@ func TestParseRefEmitsThePathSentinel(t *testing.T) {
 		require.Error(t, err, bad)
 		assert.ErrorIs(t, err, document.ErrPath, bad)
 	}
+}
+
+// TestComputeHonoursTheConfiguredLimits pins the fix for a defect an
+// adversarial pass reproduced: the compute plane ran on engine defaults while
+// the edit path honoured the operator's cap, so one setting meant two
+// different ceilings depending on which request arrived.
+func TestComputeHonoursTheConfiguredLimits(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.tsvt"), []byte(`=rept("x",5000)`+"\n"), 0o600))
+	documents, err := store.Open(store.RootDir(dir), tsvsheet.DefaultLimits())
+	require.NoError(t, err)
+
+	capped := NewHandler(Config{
+		Port:           documents,
+		Limits:         tsvsheet.Limits{ResultCells: 10, GridDim: 10, ResultBytes: 16},
+		ComputeEnabled: WithComputePlane,
+		Clock:          fixedClock,
+	})
+	rec := httptest.NewRecorder()
+	capped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/big.tsvt!A1", nil))
+	assert.Equal(t, "#VALUE!\n", rec.Body.String(), "the operator's byte ceiling bounds a computed read")
+
+	uncapped := NewHandler(Config{
+		Port:           documents,
+		Limits:         tsvsheet.DefaultLimits(),
+		ComputeEnabled: WithComputePlane,
+		Clock:          fixedClock,
+	})
+	wide := httptest.NewRecorder()
+	uncapped.ServeHTTP(wide, httptest.NewRequest(http.MethodGet, "/big.tsvt!A1", nil))
+	assert.Len(t, wide.Body.String(), 5001, "and without it the same read is served in full")
 }

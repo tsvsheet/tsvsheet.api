@@ -144,9 +144,18 @@ func representationTag(rev tsvsheet.RevisionHex, served mediaType) string {
 	return `"` + hex.EncodeToString(sum[:]) + `"`
 }
 
-// computedGrid evaluates a snapshot at the configured clock.
+// computedGrid evaluates a snapshot at the configured clock, bounded by the
+// operator's limits.
+//
+// The limits are not decoration: an adversarial pass found this path running
+// on engine defaults while the edit path honoured the configured cap, so one
+// operator setting meant two different ceilings depending on which request
+// arrived. See TestComputeHonoursTheConfiguredLimits.
 func (handler Handler) computedGrid(snap document.Snapshot) tsvsheet.Grid {
-	return snap.Doc.Sheet().ComputeAt(handler.config.Clock())
+	return snap.Doc.Sheet().ComputeWith(tsvsheet.ComputeOptions{
+		At:     handler.config.Clock(),
+		Limits: handler.config.Limits,
+	})
 }
 
 // body writes one full representation (HEAD elides the body).

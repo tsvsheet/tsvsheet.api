@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/tsvsheet/tsvsheet.api/conformance"
 	"github.com/tsvsheet/tsvsheet.api/document"
 )
 
@@ -205,5 +206,36 @@ func TestConformanceNilBodyIsAnEmptyDocument(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, bool(created))
 		assert.Empty(t, string(snap.Text))
+	})
+}
+
+// TestConformanceOnlySheetsAreServed pins the extension rule: a port is
+// pointed at a directory, and without this every file under it would be
+// readable and writable through the same requests — an operator pointing one
+// at a project checkout would be serving its dotfiles, not its spreadsheets.
+func TestConformanceOnlySheetsAreServed(t *testing.T) {
+	fixtures := map[string]string{"a.tsvt": conformance.Seed, ".env": "SECRET=hunter2\n", "notes.txt": "hello\n"}
+	for _, refused := range []document.DocPath{".env", "notes.txt", "a.tsv", "a.TSVT", ".tsvt", "a.tsvt.bak"} {
+		conform(t, "not-a-sheet/"+string(refused), fixtures, func(t *testing.T, port document.Port) {
+			_, err := port.Get(context.Background(), refused)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, document.ErrMissing)
+
+			_, _, writeErr := port.Put(context.Background(), refused, []byte("PWNED\n"), document.ExpectAbsent())
+			require.Error(t, writeErr)
+			assert.ErrorIs(t, writeErr, document.ErrMissing)
+		})
+	}
+}
+
+// TestConformanceARefusedWritePathIsMissingNotAServerFault pins that a path
+// the filesystem will not accept reads as "not found" on the write side too,
+// rather than blaming the server and disclosing that the escaping name exists.
+func TestConformanceARefusedWritePathIsMissingNotAServerFault(t *testing.T) {
+	conform(t, "refused-write", map[string]string{"a.tsvt": conformance.Seed}, func(t *testing.T, port document.Port) {
+		_, _, err := port.Put(context.Background(), "a.tsvt/nested.tsvt", []byte("1\n"), document.ExpectAbsent())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, document.ErrMissing)
+		assert.NotContains(t, err.Error(), "mkdirat", "no syscall text reaches a caller")
 	})
 }
