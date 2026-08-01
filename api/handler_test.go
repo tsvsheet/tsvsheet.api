@@ -15,8 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 
-	"github.com/tsvsheet/tsvsheet.api/internal/api"
-	"github.com/tsvsheet/tsvsheet.api/internal/store"
+	"github.com/tsvsheet/tsvsheet.api/api"
+	"github.com/tsvsheet/tsvsheet.api/store"
 )
 
 // fixedClock keeps compute deterministic.
@@ -32,7 +32,7 @@ func newHandler(t *testing.T, files map[string]string, compute api.ComputePlane)
 	st, err := store.Open(store.RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
 	return api.NewHandler(api.Config{
-		Store: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: compute, Clock: fixedClock,
+		Port: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: compute, Clock: fixedClock,
 	})
 }
 
@@ -243,7 +243,7 @@ func TestPostRefusedOpIs422NamingTheLine(t *testing.T) {
 	require.NoError(t, err)
 	h := api.NewHandler(
 		api.Config{
-			Store: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: api.DocumentPlaneOnly, Clock: fixedClock,
+			Port: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: api.DocumentPlaneOnly, Clock: fixedClock,
 		},
 	)
 	rec := do(h, http.MethodPost, "/a.tsvt", "setCell\tE9\tfar\n", map[string]string{
@@ -411,7 +411,7 @@ func TestUnreadableStoredDocumentIs500(t *testing.T) {
 	require.NoError(t, err)
 	h := api.NewHandler(
 		api.Config{
-			Store: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: api.DocumentPlaneOnly, Clock: fixedClock,
+			Port: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: api.DocumentPlaneOnly, Clock: fixedClock,
 		},
 	)
 	rec := do(h, http.MethodGet, "/d.tsvt", "", nil)
@@ -510,7 +510,7 @@ func TestEscapingSymlinkIs404(t *testing.T) {
 	st, err := store.Open(store.RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
 	h := api.NewHandler(api.Config{
-		Store: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: api.DocumentPlaneOnly, Clock: fixedClock,
+		Port: st, Limits: tsvsheet.DefaultLimits(), ComputeEnabled: api.DocumentPlaneOnly, Clock: fixedClock,
 	})
 	rec := do(h, http.MethodGet, "/link.tsvt", "", nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code)

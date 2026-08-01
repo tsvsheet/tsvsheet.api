@@ -46,7 +46,7 @@ func TestWriteFailureLeavesDocumentIntact(t *testing.T) {
 	prev := writeFileIn
 	writeFileIn = func(*os.Root, string, []byte, os.FileMode) error { return errors.New("disk full") }
 	t.Cleanup(func() { writeFileIn = prev })
-	_, err := st.Apply("a.tsvt", batchOf(t, "setCell\tA1\t2\n"), revOf(t, "1\n"))
+	_, err := st.Apply(t.Context(), "a.tsvt", batchOf(t, "setCell\tA1\t2\n"), revOf(t, "1\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocWrite)
 	saved, readErr := os.ReadFile(filepath.Join(dir, "a.tsvt"))
@@ -59,7 +59,7 @@ func TestRenameFailureRemovesStagingAndLeavesDocument(t *testing.T) {
 	prev := renameIn
 	renameIn = func(*os.Root, string, string) error { return errors.New("cross-device") }
 	t.Cleanup(func() { renameIn = prev })
-	_, _, err := st.Put("a.tsvt", []byte("2\n"), ExpectRev(revOf(t, "1\n")))
+	_, _, err := st.Put(t.Context(), "a.tsvt", []byte("2\n"), ExpectRev(revOf(t, "1\n")))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocWrite)
 	saved, readErr := os.ReadFile(filepath.Join(dir, "a.tsvt"))
@@ -75,7 +75,7 @@ func TestRemoveFailureSurfacesAsWriteError(t *testing.T) {
 	prev := removeIn
 	removeIn = func(*os.Root, string) error { return errors.New("busy") }
 	t.Cleanup(func() { removeIn = prev })
-	err := st.Delete("a.tsvt", revOf(t, "1\n"))
+	err := st.Delete(t.Context(), "a.tsvt", revOf(t, "1\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocWrite)
 }
@@ -87,10 +87,10 @@ func TestPathThroughAFileIsMissingThenUnwritable(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "sub"), []byte("a file"), 0o600))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
-	_, getErr := st.Get("sub/x.tsvt")
+	_, getErr := st.Get(t.Context(), "sub/x.tsvt")
 	require.Error(t, getErr)
 	assert.ErrorIs(t, getErr, constants.ErrDocMissing)
-	_, _, putErr := st.Put("sub/x.tsvt", []byte("1\n"), ExpectAbsent())
+	_, _, putErr := st.Put(t.Context(), "sub/x.tsvt", []byte("1\n"), ExpectAbsent())
 	require.Error(t, putErr)
 	assert.ErrorIs(t, putErr, constants.ErrDocWrite)
 }
@@ -105,7 +105,7 @@ func TestEscapingSymlinkIsMissingNotAServerFault(t *testing.T) {
 	require.NoError(t, os.Symlink(outside, filepath.Join(dir, "link.tsvt")))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
-	_, getErr := st.Get("link.tsvt")
+	_, getErr := st.Get(t.Context(), "link.tsvt")
 	require.Error(t, getErr)
 	assert.ErrorIs(t, getErr, constants.ErrDocMissing)
 	assert.NotContains(t, errText(getErr), "secret")
@@ -113,7 +113,7 @@ func TestEscapingSymlinkIsMissingNotAServerFault(t *testing.T) {
 
 func TestInvalidNameIsMissing(t *testing.T) {
 	st, _ := seeded(t)
-	_, err := st.Get(DocPath("a.tsvt\x00.png"))
+	_, err := st.Get(t.Context(), DocPath("a.tsvt\x00.png"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocMissing)
 }
@@ -127,7 +127,7 @@ func TestMkdirFailureSurfacesAsWriteError(t *testing.T) {
 	prev := mkdirIn
 	mkdirIn = func(*os.Root, string, os.FileMode) error { return errors.New("read-only fs") }
 	t.Cleanup(func() { mkdirIn = prev })
-	_, _, putErr := st.Put("sub/x.tsvt", []byte("1\n"), ExpectAbsent())
+	_, _, putErr := st.Put(t.Context(), "sub/x.tsvt", []byte("1\n"), ExpectAbsent())
 	require.Error(t, putErr)
 	assert.ErrorIs(t, putErr, constants.ErrDocWrite)
 }
@@ -137,7 +137,7 @@ func TestReadFailureOnDirectoryDocument(t *testing.T) {
 	require.NoError(t, os.Mkdir(filepath.Join(dir, "d.tsvt"), 0o700))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
-	_, getErr := st.Get("d.tsvt")
+	_, getErr := st.Get(t.Context(), "d.tsvt")
 	require.Error(t, getErr)
 	assert.ErrorIs(t, getErr, constants.ErrDocRead)
 }
@@ -147,7 +147,7 @@ func TestPutOverUnparsableExistingPropagatesParseError(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.tsvt"), []byte("=(\n"), 0o600))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
 	require.NoError(t, err)
-	_, _, putErr := st.Put("bad.tsvt", []byte("1\n"), ExpectAbsent())
+	_, _, putErr := st.Put(t.Context(), "bad.tsvt", []byte("1\n"), ExpectAbsent())
 	require.Error(t, putErr)
 	assert.ErrorIs(t, putErr, constants.ErrDocParse)
 }

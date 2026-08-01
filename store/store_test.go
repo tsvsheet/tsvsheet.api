@@ -10,7 +10,7 @@ import (
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 
 	"github.com/tsvsheet/tsvsheet.api/internal/constants"
-	"github.com/tsvsheet/tsvsheet.api/internal/store"
+	"github.com/tsvsheet/tsvsheet.api/store"
 )
 
 // opened returns a store over a fresh temp root seeded with the given files.
@@ -49,7 +49,7 @@ func TestOpenMissingRoot(t *testing.T) {
 
 func TestGetReturnsCanonicalTextAndRevision(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\t2\n"})
-	snap, err := st.Get("a.tsvt")
+	snap, err := st.Get(t.Context(), "a.tsvt")
 	require.NoError(t, err)
 	assert.Equal(t, "1\t2\n", string(snap.Text))
 	assert.Equal(t, revision(t, "1\t2\n"), snap.Rev)
@@ -59,7 +59,7 @@ func TestGetCanonicalizesLegacyForms(t *testing.T) {
 	// A file missing its trailing newline is served canonicalized, and the
 	// revision names the canonical bytes, not the raw file.
 	st := opened(t, map[string]string{"a.tsvt": "1\t2"})
-	snap, err := st.Get("a.tsvt")
+	snap, err := st.Get(t.Context(), "a.tsvt")
 	require.NoError(t, err)
 	assert.Equal(t, "1\t2\n", string(snap.Text))
 	assert.Equal(t, revision(t, "1\t2\n"), snap.Rev)
@@ -67,14 +67,14 @@ func TestGetCanonicalizesLegacyForms(t *testing.T) {
 
 func TestGetMissing(t *testing.T) {
 	st := opened(t, nil)
-	_, err := st.Get("absent.tsvt")
+	_, err := st.Get(t.Context(), "absent.tsvt")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocMissing)
 }
 
 func TestGetUnparsableStoredDocument(t *testing.T) {
 	st := opened(t, map[string]string{"bad.tsvt": "=(\n"})
-	_, err := st.Get("bad.tsvt")
+	_, err := st.Get(t.Context(), "bad.tsvt")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocParse)
 }
@@ -92,7 +92,7 @@ func TestPathRefusals(t *testing.T) {
 		"trailing up": "..",
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := st.Get(p)
+			_, err := st.Get(t.Context(), p)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, constants.ErrDocPath)
 		})
@@ -101,92 +101,92 @@ func TestPathRefusals(t *testing.T) {
 
 func TestPutCreates(t *testing.T) {
 	st := opened(t, nil)
-	snap, created, err := st.Put("new.tsvt", []byte("1\t2\n"), store.ExpectAbsent())
+	snap, created, err := st.Put(t.Context(), "new.tsvt", []byte("1\t2\n"), store.ExpectAbsent())
 	require.NoError(t, err)
-	assert.True(t, created)
+	assert.True(t, bool(created))
 	assert.Equal(t, revision(t, "1\t2\n"), snap.Rev)
-	got, err := st.Get("new.tsvt")
+	got, err := st.Get(t.Context(), "new.tsvt")
 	require.NoError(t, err)
 	assert.Equal(t, "1\t2\n", string(got.Text))
 }
 
 func TestPutCreateOverExistingRefused(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\n"})
-	_, _, err := st.Put("a.tsvt", []byte("2\n"), store.ExpectAbsent())
+	_, _, err := st.Put(t.Context(), "a.tsvt", []byte("2\n"), store.ExpectAbsent())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocExists)
 }
 
 func TestPutReplaceWithMatchingRevision(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\n"})
-	snap, created, err := st.Put("a.tsvt", []byte("2\n"), store.ExpectRev(revision(t, "1\n")))
+	snap, created, err := st.Put(t.Context(), "a.tsvt", []byte("2\n"), store.ExpectRev(revision(t, "1\n")))
 	require.NoError(t, err)
-	assert.False(t, created)
+	assert.False(t, bool(created))
 	assert.Equal(t, revision(t, "2\n"), snap.Rev)
 }
 
 func TestPutReplaceStaleRevision(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\n"})
-	_, _, err := st.Put("a.tsvt", []byte("2\n"), store.ExpectRev(revision(t, "stale\n")))
+	_, _, err := st.Put(t.Context(), "a.tsvt", []byte("2\n"), store.ExpectRev(revision(t, "stale\n")))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrPrecond)
 }
 
 func TestPutReplaceMissingDocument(t *testing.T) {
 	st := opened(t, nil)
-	_, _, err := st.Put("a.tsvt", []byte("2\n"), store.ExpectRev(revision(t, "1\n")))
+	_, _, err := st.Put(t.Context(), "a.tsvt", []byte("2\n"), store.ExpectRev(revision(t, "1\n")))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocMissing)
 }
 
 func TestPutCanonicalizesBody(t *testing.T) {
 	st := opened(t, map[string]string{})
-	snap, _, err := st.Put("a.tsvt", []byte("1\t2"), store.ExpectAbsent())
+	snap, _, err := st.Put(t.Context(), "a.tsvt", []byte("1\t2"), store.ExpectAbsent())
 	require.NoError(t, err)
 	assert.Equal(t, revision(t, "1\t2\n"), snap.Rev)
 }
 
 func TestPutUnparsableBody(t *testing.T) {
 	st := opened(t, nil)
-	_, _, err := st.Put("a.tsvt", []byte("=(\n"), store.ExpectAbsent())
+	_, _, err := st.Put(t.Context(), "a.tsvt", []byte("=(\n"), store.ExpectAbsent())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocSyntax)
 }
 
 func TestPutIntoSubdirectory(t *testing.T) {
 	st := opened(t, nil)
-	_, created, err := st.Put("lib/inner.tsvt", []byte("1\n"), store.ExpectAbsent())
+	_, created, err := st.Put(t.Context(), "lib/inner.tsvt", []byte("1\n"), store.ExpectAbsent())
 	require.NoError(t, err)
-	assert.True(t, created)
-	got, err := st.Get("lib/inner.tsvt")
+	assert.True(t, bool(created))
+	got, err := st.Get(t.Context(), "lib/inner.tsvt")
 	require.NoError(t, err)
 	assert.Equal(t, "1\n", string(got.Text))
 }
 
 func TestApplyAdvancesTheDocument(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\t2\n"})
-	applied, err := st.Apply("a.tsvt", edits(t, "setCell\tB1\t9\n"), revision(t, "1\t2\n"))
+	applied, err := st.Apply(t.Context(), "a.tsvt", edits(t, "setCell\tB1\t9\n"), revision(t, "1\t2\n"))
 	require.NoError(t, err)
 	assert.Equal(t, revision(t, "1\t2\n"), applied.Old.Rev)
 	assert.Equal(t, revision(t, "1\t9\n"), applied.New.Rev)
-	got, err := st.Get("a.tsvt")
+	got, err := st.Get(t.Context(), "a.tsvt")
 	require.NoError(t, err)
 	assert.Equal(t, "1\t9\n", string(got.Text))
 }
 
 func TestApplyStaleRevisionLeavesFile(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\t2\n"})
-	_, err := st.Apply("a.tsvt", edits(t, "setCell\tB1\t9\n"), revision(t, "other\n"))
+	_, err := st.Apply(t.Context(), "a.tsvt", edits(t, "setCell\tB1\t9\n"), revision(t, "other\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrPrecond)
-	got, getErr := st.Get("a.tsvt")
+	got, getErr := st.Get(t.Context(), "a.tsvt")
 	require.NoError(t, getErr)
 	assert.Equal(t, "1\t2\n", string(got.Text))
 }
 
 func TestApplyMissingDocument(t *testing.T) {
 	st := opened(t, nil)
-	_, err := st.Apply("a.tsvt", edits(t, "setCell\tB1\t9\n"), revision(t, "1\n"))
+	_, err := st.Apply(t.Context(), "a.tsvt", edits(t, "setCell\tB1\t9\n"), revision(t, "1\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocMissing)
 }
@@ -196,10 +196,10 @@ func TestApplyConflictingInBandBaseRefused(t *testing.T) {
 	// document is ErrEditsBase, and the file is untouched.
 	st := opened(t, map[string]string{"a.tsvt": "1\t2\n"})
 	batch := edits(t, "#.base\t"+string(revision(t, "other\n"))+"\nsetCell\tB1\t9\n")
-	_, err := st.Apply("a.tsvt", batch, revision(t, "1\t2\n"))
+	_, err := st.Apply(t.Context(), "a.tsvt", batch, revision(t, "1\t2\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, tsvsheet.ErrEditsBase)
-	got, getErr := st.Get("a.tsvt")
+	got, getErr := st.Get(t.Context(), "a.tsvt")
 	require.NoError(t, getErr)
 	assert.Equal(t, "1\t2\n", string(got.Text))
 }
@@ -211,34 +211,34 @@ func TestApplyRefusedOpLeavesFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.tsvt"), []byte("1\t2\n"), 0o600))
 	st, err := store.Open(store.RootDir(dir), tsvsheet.Limits{ResultCells: 4, GridDim: 2, ResultBytes: 64})
 	require.NoError(t, err)
-	_, applyErr := st.Apply("a.tsvt", edits(t, "setCell\tE9\tfar\n"), revision(t, "1\t2\n"))
+	_, applyErr := st.Apply(t.Context(), "a.tsvt", edits(t, "setCell\tE9\tfar\n"), revision(t, "1\t2\n"))
 	require.Error(t, applyErr)
 	assert.ErrorIs(t, applyErr, tsvsheet.ErrEditsApply)
-	got, getErr := st.Get("a.tsvt")
+	got, getErr := st.Get(t.Context(), "a.tsvt")
 	require.NoError(t, getErr)
 	assert.Equal(t, "1\t2\n", string(got.Text))
 }
 
 func TestDeleteWithMatchingRevision(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\n"})
-	require.NoError(t, st.Delete("a.tsvt", revision(t, "1\n")))
-	_, err := st.Get("a.tsvt")
+	require.NoError(t, st.Delete(t.Context(), "a.tsvt", revision(t, "1\n")))
+	_, err := st.Get(t.Context(), "a.tsvt")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocMissing)
 }
 
 func TestDeleteStaleRevision(t *testing.T) {
 	st := opened(t, map[string]string{"a.tsvt": "1\n"})
-	err := st.Delete("a.tsvt", revision(t, "2\n"))
+	err := st.Delete(t.Context(), "a.tsvt", revision(t, "2\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrPrecond)
-	_, getErr := st.Get("a.tsvt")
+	_, getErr := st.Get(t.Context(), "a.tsvt")
 	require.NoError(t, getErr)
 }
 
 func TestDeleteMissing(t *testing.T) {
 	st := opened(t, nil)
-	err := st.Delete("a.tsvt", revision(t, "1\n"))
+	err := st.Delete(t.Context(), "a.tsvt", revision(t, "1\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, constants.ErrDocMissing)
 }

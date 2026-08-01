@@ -20,9 +20,9 @@ import (
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 	"github.com/urfave/cli/v3"
 
-	"github.com/tsvsheet/tsvsheet.api/internal/api"
+	"github.com/tsvsheet/tsvsheet.api/api"
 	"github.com/tsvsheet/tsvsheet.api/internal/constants"
-	"github.com/tsvsheet/tsvsheet.api/internal/store"
+	"github.com/tsvsheet/tsvsheet.api/store"
 )
 
 const (
@@ -130,7 +130,7 @@ func buildServer(c *cli.Command) (*http.Server, error) {
 		return nil, err
 	}
 	handler := api.NewHandler(api.Config{
-		Store:          st,
+		Port:           st,
 		Limits:         limits,
 		ComputeEnabled: api.ComputePlane(!c.Bool(flagNoCompute)),
 		Clock:          clock,

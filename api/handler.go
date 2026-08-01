@@ -6,6 +6,7 @@
 package api
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -17,8 +18,7 @@ import (
 
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 
-	"github.com/tsvsheet/tsvsheet.api/internal/constants"
-	"github.com/tsvsheet/tsvsheet.api/internal/store"
+	"github.com/tsvsheet/tsvsheet.api/document"
 )
 
 // ComputePlane selects whether the server carries the engine's compute plane.
@@ -36,7 +36,7 @@ type Clock func() time.Time
 
 // Config assembles a handler.
 type Config struct {
-	Store          *store.Store
+	Port           document.Port
 	Clock          Clock
 	Limits         tsvsheet.Limits
 	ComputeEnabled ComputePlane
@@ -74,7 +74,7 @@ func (handler Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // route dispatches by method.
-func (handler Handler) route(w http.ResponseWriter, r *http.Request, doc store.DocPath, ref string) {
+func (handler Handler) route(w http.ResponseWriter, r *http.Request, doc document.DocPath, ref string) {
 	// A reference names a computed projection, which only a read can serve.
 	// Accepting it on a mutation would let a cell URL replace or delete the
 	// whole document, so it is refused rather than silently ignored.
@@ -113,13 +113,13 @@ func (handler Handler) capabilities() string {
 
 // get serves every GET representation: the change feed, a computed reference,
 // a computed grid, or the source document.
-func (handler Handler) get(w http.ResponseWriter, r *http.Request, doc store.DocPath, ref string) {
+func (handler Handler) get(w http.ResponseWriter, r *http.Request, doc document.DocPath, ref string) {
 	accept := parseAccept(acceptHeader(r.Header.Get("Accept")))
 	if accept.has(TypeStream) {
 		handler.feed(w, r, doc)
 		return
 	}
-	snap, err := handler.pinned(doc, r.URL.Query().Get("rev"))
+	snap, err := handler.pinned(r.Context(), doc, r.URL.Query().Get("rev"))
 	if err != nil {
 		handler.writeError(w, err)
 		return
@@ -133,21 +133,21 @@ func (handler Handler) get(w http.ResponseWriter, r *http.Request, doc store.Doc
 
 // pinned loads the document, honouring a ?rev= pin: this server keeps no
 // history, so only the head revision is addressable.
-func (handler Handler) pinned(doc store.DocPath, rev string) (store.Snapshot, error) {
-	snap, err := handler.config.Store.Get(doc)
+func (handler Handler) pinned(ctx context.Context, doc document.DocPath, rev string) (document.Snapshot, error) {
+	snap, err := handler.config.Port.Get(ctx, doc)
 	if err != nil {
-		return store.Snapshot{}, err
+		return document.Snapshot{}, err
 	}
 	if rev != "" && rev != string(snap.Rev) {
-		return store.Snapshot{}, constants.ErrDocMissing.With(nil, "rev", rev)
+		return document.Snapshot{}, document.ErrMissing.With(nil, "rev", rev)
 	}
 	return snap, nil
 }
 
 // feed subscribes the client to the document's event stream (the document
 // must exist).
-func (handler Handler) feed(w http.ResponseWriter, r *http.Request, doc store.DocPath) {
-	snap, err := handler.config.Store.Get(doc)
+func (handler Handler) feed(w http.ResponseWriter, r *http.Request, doc document.DocPath) {
+	snap, err := handler.config.Port.Get(r.Context(), doc)
 	if err != nil {
 		handler.writeError(w, err)
 		return
@@ -158,7 +158,7 @@ func (handler Handler) feed(w http.ResponseWriter, r *http.Request, doc store.Do
 // document serves the source or the whole computed grid per the Accept set.
 // The hard rule lives here: a values Accept (the §9 grid types) is never
 // answered with source bytes — without the compute plane it is 406.
-func (handler Handler) document(w http.ResponseWriter, r *http.Request, snap store.Snapshot, accept acceptSet) {
+func (handler Handler) document(w http.ResponseWriter, r *http.Request, snap document.Snapshot, accept acceptSet) {
 	if accept.has(TypeDoc) || (accept.wildcard() && !accept.hasAny(TypeSheet, TypeTSV, TypeCSV)) {
 		handler.body(w, r, TypeDoc, snap, string(snap.Text))
 		return
@@ -179,7 +179,7 @@ func (handler Handler) document(w http.ResponseWriter, r *http.Request, snap sto
 }
 
 // computedRef serves one computed reference read in its §9 shape type.
-func (handler Handler) computedRef(w http.ResponseWriter, snap store.Snapshot, ref string, accept acceptSet) {
+func (handler Handler) computedRef(w http.ResponseWriter, snap document.Snapshot, ref string, accept acceptSet) {
 	if handler.config.ComputeEnabled == DocumentPlaneOnly {
 		writeProblem(w, http.StatusNotAcceptable, problemNotAcceptable, "this deployment has no compute plane")
 		return
@@ -215,7 +215,7 @@ type mediaType string
 // so no two representations are ever interchangeable to a cache. A volatile
 // sheet's computed body may differ between two reads of one revision, so it
 // carries no strong validator and is not stored at all.
-func setValidator(w http.ResponseWriter, snap store.Snapshot, served mediaType) {
+func setValidator(w http.ResponseWriter, snap document.Snapshot, served mediaType) {
 	w.Header().Set("Vary", "Accept")
 	if served == TypeDoc {
 		w.Header().Set("Cache-Control", "no-cache")
@@ -239,7 +239,7 @@ func representationTag(rev tsvsheet.RevisionHex, served mediaType) string {
 }
 
 // computedGrid evaluates a snapshot at the configured clock.
-func (handler Handler) computedGrid(snap store.Snapshot) tsvsheet.Grid {
+func (handler Handler) computedGrid(snap document.Snapshot) tsvsheet.Grid {
 	return snap.Doc.Sheet().ComputeAt(handler.config.Clock())
 }
 
@@ -248,7 +248,7 @@ func (handler Handler) body(
 	w http.ResponseWriter,
 	r *http.Request,
 	served mediaType,
-	snap store.Snapshot,
+	snap document.Snapshot,
 	text string,
 ) {
 	w.Header().Set("Content-Type", string(served))
@@ -260,7 +260,7 @@ func (handler Handler) body(
 }
 
 // put replaces or creates the document from a source body.
-func (handler Handler) put(w http.ResponseWriter, r *http.Request, doc store.DocPath) {
+func (handler Handler) put(w http.ResponseWriter, r *http.Request, doc document.DocPath) {
 	if mediaBase(mediaExpr(r.Header.Get("Content-Type"))) != TypeDoc {
 		writeProblem(w, http.StatusUnsupportedMediaType, problemUnsupported, "PUT bodies are "+TypeDoc)
 		return
@@ -274,7 +274,7 @@ func (handler Handler) put(w http.ResponseWriter, r *http.Request, doc store.Doc
 	if !ok {
 		return
 	}
-	snap, created, err := handler.config.Store.Put(doc, body, expect)
+	snap, created, err := handler.config.Port.Put(r.Context(), doc, body, expect)
 	if err != nil {
 		handler.writeError(w, err)
 		return
@@ -297,19 +297,19 @@ func statusOfPut(isCreated docCreated) int {
 
 // putExpectation reads PUT's precondition: If-Match names the revision to
 // replace, If-None-Match: * requires creation; neither is 428.
-func putExpectation(r *http.Request) (store.Expect, httpStatus, error) {
+func putExpectation(r *http.Request) (document.Expect, httpStatus, error) {
 	if r.Header.Get("If-None-Match") == "*" {
-		return store.ExpectAbsent(), 0, nil
+		return document.ExpectAbsent(), 0, nil
 	}
 	rev, status, err := ifMatchRevision(r)
 	if err != nil {
-		return store.Expect{}, status, err
+		return document.Expect{}, status, err
 	}
-	return store.ExpectRev(rev), 0, nil
+	return document.ExpectRev(rev), 0, nil
 }
 
 // post applies an edits batch.
-func (handler Handler) post(w http.ResponseWriter, r *http.Request, doc store.DocPath) {
+func (handler Handler) post(w http.ResponseWriter, r *http.Request, doc document.DocPath) {
 	if mediaBase(mediaExpr(r.Header.Get("Content-Type"))) != TypeEdits {
 		writeProblem(w, http.StatusUnsupportedMediaType, problemUnsupported, "POST bodies are "+TypeEdits)
 		return
@@ -333,7 +333,7 @@ func (handler Handler) post(w http.ResponseWriter, r *http.Request, doc store.Do
 func (handler Handler) apply(
 	w http.ResponseWriter,
 	r *http.Request,
-	doc store.DocPath,
+	doc document.DocPath,
 	body []byte,
 	rev tsvsheet.RevisionHex,
 ) {
@@ -342,7 +342,7 @@ func (handler Handler) apply(
 		writeProblem(w, http.StatusBadRequest, problemBadEdits, problemDetail(err.Error()))
 		return
 	}
-	applied, err := handler.config.Store.Apply(doc, batch, rev)
+	applied, err := handler.config.Port.Apply(r.Context(), doc, batch, rev)
 	if err != nil {
 		handler.writeError(w, err)
 		return
@@ -355,7 +355,7 @@ func (handler Handler) apply(
 
 // announce broadcasts the applied batch (and, with the compute plane, the
 // recomputed-cells delta).
-func (handler Handler) announce(doc store.DocPath, applied store.Applied, body []byte) {
+func (handler Handler) announce(doc document.DocPath, applied document.Applied, body []byte) {
 	payload := metaBase + "\t" + string(applied.Old.Rev) + "\n" +
 		metaRev + "\t" + string(applied.New.Rev) + "\n" + string(body)
 	handler.hub.broadcast(doc, eventChanged, payload)
@@ -369,13 +369,13 @@ func (handler Handler) announce(doc store.DocPath, applied store.Applied, body [
 }
 
 // delete removes the document and ends its feed.
-func (handler Handler) delete(w http.ResponseWriter, r *http.Request, doc store.DocPath) {
+func (handler Handler) delete(w http.ResponseWriter, r *http.Request, doc document.DocPath) {
 	rev, status, err := ifMatchRevision(r)
 	if err != nil {
 		writeProblem(w, status, problemOf(status), problemDetail(err.Error()))
 		return
 	}
-	if err := handler.config.Store.Delete(doc, rev); err != nil {
+	if err := handler.config.Port.Delete(r.Context(), doc, rev); err != nil {
 		handler.writeError(w, err)
 		return
 	}
@@ -404,12 +404,12 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 func ifMatchRevision(r *http.Request) (tsvsheet.RevisionHex, httpStatus, error) {
 	header := r.Header.Get("If-Match")
 	if header == "" {
-		return "", http.StatusPreconditionRequired, constants.ErrPrecond.With(nil, "missing", "If-Match")
+		return "", http.StatusPreconditionRequired, document.ErrPrecondition.With(nil, "missing", "If-Match")
 	}
 	rev, ok := strings.CutPrefix(header, `"`)
 	rev, ok2 := strings.CutSuffix(rev, `"`)
 	if !ok || !ok2 || rev == "" {
-		return "", http.StatusBadRequest, constants.ErrPrecond.With(nil, "malformed", header)
+		return "", http.StatusBadRequest, document.ErrPrecondition.With(nil, "malformed", header)
 	}
 	return tsvsheet.RevisionHex(rev), 0, nil
 }
@@ -446,12 +446,12 @@ type errorMapping struct {
 // errorMap orders the sentinel-to-status mappings; first match wins, so the
 // more specific edits sentinels precede the general ones.
 var errorMap = []errorMapping{
-	{is: constants.ErrDocMissing, slug: problemNotFound, status: http.StatusNotFound},
-	{is: constants.ErrDocPath, slug: problemNotFound, status: http.StatusNotFound},
-	{is: constants.ErrPrecond, slug: problemPrecondition, status: http.StatusPreconditionFailed},
-	{is: constants.ErrDocExists, slug: problemConflict, status: http.StatusConflict},
-	{is: constants.ErrDocSyntax, slug: problemRefusedEdits, status: http.StatusUnprocessableEntity},
-	{is: tsvsheet.ErrEditsBase, slug: problemRefusedEdits, status: http.StatusUnprocessableEntity},
+	{is: document.ErrMissing, slug: problemNotFound, status: http.StatusNotFound},
+	{is: document.ErrPath, slug: problemNotFound, status: http.StatusNotFound},
+	{is: document.ErrPrecondition, slug: problemPrecondition, status: http.StatusPreconditionFailed},
+	{is: document.ErrExists, slug: problemConflict, status: http.StatusConflict},
+	{is: document.ErrSyntax, slug: problemBadDocument, status: http.StatusUnprocessableEntity},
+	{is: tsvsheet.ErrEditsBase, slug: problemStaleBase, status: http.StatusUnprocessableEntity},
 	{is: tsvsheet.ErrEditsApply, slug: problemRefusedEdits, status: http.StatusUnprocessableEntity},
 }
 
@@ -459,10 +459,10 @@ var errorMap = []errorMapping{
 type requestPath string
 
 // splitDocRef separates the document path from a `!` reference suffix.
-func splitDocRef(urlPath requestPath) (store.DocPath, string) {
+func splitDocRef(urlPath requestPath) (document.DocPath, string) {
 	trimmed := strings.TrimPrefix(string(urlPath), "/")
 	doc, ref, _ := strings.Cut(trimmed, "!")
-	return store.DocPath(doc), ref
+	return document.DocPath(doc), ref
 }
 
 // replayOutcome is what one Idempotency-Key produced: the revision it left
@@ -491,7 +491,7 @@ func newReplayCache() *replayCache { return &replayCache{seen: map[string]replay
 // key when it was first used for a different batch. A replay must be a repeat
 // of the same request: answering a *new* batch with an old result would drop
 // the edit and report success, which the client cannot detect.
-func (handler Handler) replayed(w http.ResponseWriter, r *http.Request, doc store.DocPath, body []byte) bool {
+func (handler Handler) replayed(w http.ResponseWriter, r *http.Request, doc document.DocPath, body []byte) bool {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		return false
@@ -521,7 +521,7 @@ type idempotencyKey string
 
 // replayKey scopes a key to its document, so one client's key on one sheet can
 // never answer a request against another.
-func replayKey(doc store.DocPath, key idempotencyKey) string {
+func replayKey(doc document.DocPath, key idempotencyKey) string {
 	return string(doc) + "\x00" + string(key)
 }
 
@@ -530,7 +530,7 @@ func replayKey(doc store.DocPath, key idempotencyKey) string {
 func bodyDigest(body []byte) [sha256.Size]byte { return sha256.Sum256(body) }
 
 // remember records a successful application under its Idempotency-Key.
-func (handler Handler) remember(r *http.Request, doc store.DocPath, rev tsvsheet.RevisionHex, body []byte) {
+func (handler Handler) remember(r *http.Request, doc document.DocPath, rev tsvsheet.RevisionHex, body []byte) {
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
 		return

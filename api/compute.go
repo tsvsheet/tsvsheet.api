@@ -6,7 +6,7 @@ import (
 
 	tsvsheet "github.com/tsvsheet/go-tsvsheet"
 
-	"github.com/tsvsheet/tsvsheet.api/internal/constants"
+	"github.com/tsvsheet/tsvsheet.api/document"
 )
 
 // refSpan is a parsed reference suffix (`!B7`, `!A1:C10`) resolved to a
@@ -24,14 +24,14 @@ func parseRef(ref refText) (refSpan, error) {
 	fromText, toText, isRange := strings.Cut(string(ref), ":")
 	from, err := tsvsheet.ParseAddress(tsvsheet.AddressText(fromText))
 	if err != nil {
-		return refSpan{}, constants.ErrDocPath.With(err, "ref", string(ref))
+		return refSpan{}, document.ErrPath.With(err, "ref", string(ref))
 	}
 	if !isRange {
 		return refSpan{from: from, to: from}, nil
 	}
 	to, err := tsvsheet.ParseAddress(tsvsheet.AddressText(toText))
 	if err != nil {
-		return refSpan{}, constants.ErrDocPath.With(err, "ref", string(ref))
+		return refSpan{}, document.ErrPath.With(err, "ref", string(ref))
 	}
 	return refSpan{from: from, to: to}, nil
 }

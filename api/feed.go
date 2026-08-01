@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/tsvsheet/tsvsheet.api/internal/store"
+	"github.com/tsvsheet/tsvsheet.api/document"
 )
 
 // feedEvent is one change-feed message: a journal sequence, an event name,
@@ -62,15 +62,15 @@ func trimJournal(ring []feedEvent, bytes journalBytes) ([]feedEvent, journalByte
 // Pointer receivers are necessary: the hub owns a mutex and shared maps that
 // may not be copied.
 type hub struct {
-	docs map[store.DocPath]*docFeed
+	docs map[document.DocPath]*docFeed
 	mu   sync.Mutex
 }
 
 // newHub builds an empty hub.
-func newHub() *hub { return &hub{docs: map[store.DocPath]*docFeed{}} }
+func newHub() *hub { return &hub{docs: map[document.DocPath]*docFeed{}} }
 
 // feedOf returns doc's feed state, creating it, under the held lock.
-func (h *hub) feedOf(doc store.DocPath) *docFeed {
+func (h *hub) feedOf(doc document.DocPath) *docFeed {
 	feed, ok := h.docs[doc]
 	if !ok {
 		feed = &docFeed{subs: map[chan feedEvent]struct{}{}}
@@ -81,7 +81,7 @@ func (h *hub) feedOf(doc store.DocPath) *docFeed {
 
 // broadcast appends one event to doc's journal and fans it out. A subscriber
 // whose buffer is full is closed and dropped — it reconnects with replay.
-func (h *hub) broadcast(doc store.DocPath, name, data string) {
+func (h *hub) broadcast(doc document.DocPath, name, data string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	feed := h.feedOf(doc)
@@ -109,7 +109,7 @@ type subscription struct {
 }
 
 // subscribe registers a subscriber resuming after lastID (0 = live only).
-func (h *hub) subscribe(doc store.DocPath, lastID int64) subscription {
+func (h *hub) subscribe(doc document.DocPath, lastID int64) subscription {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	feed := h.feedOf(doc)
@@ -138,7 +138,7 @@ func (h *hub) subscribe(doc store.DocPath, lastID int64) subscription {
 }
 
 // unsubscribe removes a subscriber if still registered.
-func (h *hub) unsubscribe(doc store.DocPath, ch chan feedEvent) {
+func (h *hub) unsubscribe(doc document.DocPath, ch chan feedEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	feed := h.feedOf(doc)
@@ -150,7 +150,7 @@ func (h *hub) unsubscribe(doc store.DocPath, ch chan feedEvent) {
 
 // serveFeed streams doc's events as Server-Sent Events until the client goes
 // away or the document is deleted.
-func (handler Handler) serveFeed(w http.ResponseWriter, r *http.Request, doc store.DocPath, headRev string) {
+func (handler Handler) serveFeed(w http.ResponseWriter, r *http.Request, doc document.DocPath, headRev string) {
 	sub := handler.hub.subscribe(doc, lastEventID(r))
 	defer sub.cancel()
 	w.Header().Set("Content-Type", TypeStream)
