@@ -7,6 +7,7 @@ import errs "github.com/gomatic/go-error"
 
 // Keep these constants sorted alphabetically.
 const (
+	ErrConfig      errs.Const = "missing or invalid configuration"
 	ErrDocExists   errs.Const = "document already exists"
 	ErrDocMissing  errs.Const = "document not found"
 	ErrDocParse    errs.Const = "stored document does not parse"

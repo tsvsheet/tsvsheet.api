@@ -204,7 +204,8 @@ func TestComputeHonoursTheConfiguredLimits(t *testing.T) {
 	})
 	rec := httptest.NewRecorder()
 	capped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/big.tsvt!A1", nil))
-	assert.Equal(t, "#VALUE!\n", rec.Body.String(), "the operator's byte ceiling bounds a computed read")
+	assert.Equal(t, "#LIMIT!\n", rec.Body.String(),
+		"the operator's byte ceiling bounds a computed read as a budget refusal (§6)")
 
 	uncapped := NewHandler(Config{
 		Port:           documents,

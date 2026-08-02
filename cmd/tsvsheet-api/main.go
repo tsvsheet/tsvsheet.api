@@ -92,16 +92,30 @@ func createApp() *cli.Command {
 		Version:               version,
 		EnableShellCompletion: true,
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: flagRoot, Usage: "directory of .tsvt documents to serve", Required: true},
-			&cli.StringFlag{Name: flagAddr, Usage: "loopback address to bind", Value: "127.0.0.1:8787"},
+			&cli.StringFlag{
+				Name:    flagRoot,
+				Sources: cli.EnvVars("TSVSHEET_API_ROOT"),
+				// Deliberately no directory default: a missing --root is a
+				// usage mistake reported by serve, never an implicit cwd.
+				Value: "",
+				Usage: "directory of .tsvt documents to serve",
+			},
+			&cli.StringFlag{
+				Name:    flagAddr,
+				Sources: cli.EnvVars("TSVSHEET_API_ADDR"),
+				Usage:   "loopback address to bind",
+				Value:   "127.0.0.1:8787",
+			},
 			&cli.IntFlag{
-				Name:  flagMaxCells,
-				Usage: "cap on cells, grid dimension, and bytes per result (0 = built-in default)",
-				Value: 0,
+				Name:    flagMaxCells,
+				Sources: cli.EnvVars("TSVSHEET_API_MAX_CELLS"),
+				Usage:   "cap on cells, grid dimension, and bytes per result (0 = built-in default)",
+				Value:   0,
 			},
 			&cli.BoolFlag{
-				Name:  flagNoCompute,
-				Usage: "serve the document plane only: no computed reads, no computed events",
+				Name:    flagNoCompute,
+				Sources: cli.EnvVars("TSVSHEET_API_NO_COMPUTE"),
+				Usage:   "serve the document plane only: no computed reads, no computed events",
 			},
 		},
 		Action: serve,
@@ -110,6 +124,13 @@ func createApp() *cli.Command {
 
 // serve builds the server from the parsed flags and runs it.
 func serve(_ context.Context, c *cli.Command) error {
+	// The former Required: true, spelled as this command's own usage check: a
+	// missing --root is a configuration mistake, named as such, and the env
+	// binding (TSVSHEET_API_ROOT) satisfies it the same way the flag does.
+	if c.String(flagRoot) == "" {
+		return constants.ErrConfig.With(nil,
+			"flag", "--"+flagRoot, "hint", "name the directory of .tsvt documents to serve")
+	}
 	server, err := buildServer(c)
 	if err != nil {
 		return err
@@ -144,11 +165,18 @@ const headerTimeout = 10 * time.Second
 // cellCap is the --max-cells resource cap.
 type cellCap int
 
-// limitsOf resolves the --max-cells cap: a positive cap bounds everything a
-// formula result or grid may reach; zero keeps the engine's defaults.
+// limitsOf resolves the --max-cells cap: a positive cap is the single ceiling
+// for every budget — reference spans (SpanCells), result cells and bytes, and
+// the grid dimension; zero keeps the engine's defaults. An over-budget
+// reference or result computes to #LIMIT! (SPECIFICATION §6).
 func limitsOf(ceiling cellCap) tsvsheet.Limits {
 	if ceiling > 0 {
-		return tsvsheet.Limits{ResultCells: int(ceiling), GridDim: int(ceiling), ResultBytes: int(ceiling)}
+		return tsvsheet.Limits{
+			ResultCells: int(ceiling),
+			GridDim:     int(ceiling),
+			ResultBytes: int(ceiling),
+			SpanCells:   int(ceiling),
+		}
 	}
 	return tsvsheet.DefaultLimits()
 }

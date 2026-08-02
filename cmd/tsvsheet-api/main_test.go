@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -155,4 +156,21 @@ func TestBindRefusalsEmitTheirSentinels(t *testing.T) {
 	assert.ErrorIs(t, requireLoopback("example.com:80"), constants.ErrNotLoopback)
 	assert.NoError(t, requireLoopback("127.0.0.1:0"))
 	assert.NoError(t, requireLoopback("localhost:0"))
+}
+
+// TestRunMissingRootFlagIsAConfigError pins the former Required: true as this
+// command's own check: no --root (and no TSVSHEET_API_ROOT) is refused as
+// ErrConfig before any server is built, and the env binding satisfies the
+// requirement exactly as the flag does.
+func TestRunMissingRootFlagIsAConfigError(t *testing.T) {
+	captured := withServeStub(t, func(*http.Server) error { return nil })
+	err := createApp().Run(context.Background(), []string{name})
+	assert.ErrorIs(t, err, constants.ErrConfig)
+	assert.Empty(t, *captured, "no server may be built without a root")
+	assert.Equal(t, 1, run([]string{name}), "and the exit code names a failure")
+
+	t.Setenv("TSVSHEET_API_ROOT", docRoot(t))
+	envCode := run([]string{name, "--addr", "localhost:0"})
+	assert.Equal(t, 0, envCode)
+	assert.Len(t, *captured, 1, "the env binding satisfies the root requirement")
 }
