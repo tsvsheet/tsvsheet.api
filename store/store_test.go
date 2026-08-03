@@ -262,6 +262,12 @@ func TestStore_RefusesOverBudgetDocuments(t *testing.T) {
 
 	_, err = st.Get(context.Background(), "big.tsvt")
 	require.ErrorIs(t, err, tsvsheet.ErrDocTooLarge)
+	assert.Contains(
+		t,
+		err.Error(),
+		"path",
+		"the refusal comes from the census pre-flight (which names the path), never from a parse after buffering",
+	)
 
 	_, _, err = st.Put(context.Background(), "new.tsvt", []byte("5\t6\n7\t8\n"), document.ExpectAbsent())
 	require.ErrorIs(t, err, tsvsheet.ErrDocTooLarge)
