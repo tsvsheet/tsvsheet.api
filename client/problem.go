@@ -64,6 +64,7 @@ var sentinels = map[api.ProblemSlug]interface{ With(error, ...any) error }{
 	api.SlugPrecondition: document.ErrPrecondition,
 	api.SlugConflict:     document.ErrExists,
 	api.SlugBadDocument:  document.ErrSyntax,
+	api.SlugDocTooLarge:  tsvsheet.ErrDocTooLarge,
 	api.SlugStaleBase:    tsvsheet.ErrEditsBase,
 	api.SlugRefusedEdits: tsvsheet.ErrEditsApply,
 	api.SlugBadEdits:     tsvsheet.ErrEditsOp,

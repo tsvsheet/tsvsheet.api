@@ -8,6 +8,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"sync"
 
@@ -74,7 +75,11 @@ func (s *Store) Put(_ context.Context, p DocPath, body []byte, expect Expect) (S
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	doc, err := tsvsheet.ParseDocument(body)
+	doc, err := tsvsheet.ParseDocumentWith(body, s.limits)
+	if errors.Is(err, tsvsheet.ErrDocTooLarge) {
+		// A client may not store a document the server could never load back.
+		return Snapshot{}, false, err
+	}
 	if err != nil {
 		return Snapshot{}, false, document.ErrSyntax.With(err, "path", string(p))
 	}

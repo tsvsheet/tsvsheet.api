@@ -1,6 +1,7 @@
 package store_test
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -241,4 +242,30 @@ func TestDeleteMissing(t *testing.T) {
 	err := st.Delete(t.Context(), "a.tsvt", revision(t, "1\n"))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, document.ErrMissing)
+}
+
+// TestStore_RefusesOverBudgetDocuments pins the 018 bounded store on both
+// sides of the port: reading a stored document past the resident budget
+// refuses as ErrDocTooLarge (never an unbounded materialization), and a Put
+// whose body is over the same budget refuses identically — a client may not
+// store what the server could never load back. An in-budget write on the same
+// store succeeds, so the budget is the only thing refusing.
+func TestStore_RefusesOverBudgetDocuments(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "big.tsvt"), []byte("1\t2\n3\t4\n"), 0o600))
+	tight := tsvsheet.DefaultLimits()
+	tight.ResidentCells = 1
+	st, err := store.Open(store.RootDir(dir), tight)
+	require.NoError(t, err)
+
+	_, err = st.Get(context.Background(), "big.tsvt")
+	require.ErrorIs(t, err, tsvsheet.ErrDocTooLarge)
+
+	_, _, err = st.Put(context.Background(), "new.tsvt", []byte("5\t6\n7\t8\n"), document.ExpectAbsent())
+	require.ErrorIs(t, err, tsvsheet.ErrDocTooLarge)
+
+	_, _, err = st.Put(context.Background(), "ok.tsvt", []byte("5\n"), document.ExpectAbsent())
+	require.NoError(t, err)
 }
