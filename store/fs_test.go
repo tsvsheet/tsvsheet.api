@@ -146,7 +146,12 @@ func TestReadFailureOnDirectoryDocument(t *testing.T) {
 	assert.ErrorIs(t, getErr, ErrRead)
 }
 
-func TestPutOverUnparsableExistingPropagatesParseError(t *testing.T) {
+// TestPutOverUnparsableExistingIsErrParseNotTheRequests names ErrParse's
+// contract: it is always about the STORED bytes — corruption or an out-of-band
+// edit, never something a request did. The request body here is valid, so the
+// refusal must be ErrParse about the file and never document.ErrSyntax about
+// the body.
+func TestPutOverUnparsableExistingIsErrParseNotTheRequests(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.tsvt"), []byte("=(\n"), 0o600))
 	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
@@ -154,6 +159,7 @@ func TestPutOverUnparsableExistingPropagatesParseError(t *testing.T) {
 	_, _, putErr := st.Put(t.Context(), "bad.tsvt", []byte("1\n"), document.ExpectAbsent())
 	require.Error(t, putErr)
 	assert.ErrorIs(t, putErr, ErrParse)
+	assert.NotErrorIs(t, putErr, document.ErrSyntax, "a valid request body is never what ErrParse names")
 }
 
 // TestRefusedNamesCarryTheirSyscallCause pins the two OS refusals this file

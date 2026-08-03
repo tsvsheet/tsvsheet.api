@@ -42,7 +42,9 @@ func edits(t *testing.T, src string) tsvsheet.Edits {
 	return batch
 }
 
-func TestOpenMissingRoot(t *testing.T) {
+// TestOpenMissingRootIsErrRootOpen names ErrRootOpen's contract: a document
+// root that cannot be opened for confinement refuses the store's construction.
+func TestOpenMissingRootIsErrRootOpen(t *testing.T) {
 	_, err := store.Open(store.RootDir(filepath.Join(t.TempDir(), "absent")), tsvsheet.DefaultLimits())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, store.ErrRootOpen)

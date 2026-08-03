@@ -50,10 +50,13 @@ func TestExpectStatesOneRequirement(t *testing.T) {
 	assert.True(t, document.Expect{}.IsZero(), "a value built by neither constructor expects nothing")
 }
 
-// TestSentinelsAreDistinct pins that the plane's errors do not collide: two
-// conditions sharing an error would make a caller unable to tell a conflict
-// from a missing document.
-func TestSentinelsAreDistinct(t *testing.T) {
+// TestErrUnavailableAndTheDocumentSentinelsAreDistinct pins that the plane's
+// errors do not collide: two conditions sharing an error would make a caller
+// unable to tell a conflict from a missing document. The matrix is also what
+// holds ErrUnavailable's contract — a transport fault, never a statement about
+// the document — since it must match none of the five document-state sentinels
+// and none of them may match it.
+func TestErrUnavailableAndTheDocumentSentinelsAreDistinct(t *testing.T) {
 	t.Parallel()
 	all := []error{
 		document.ErrExists, document.ErrMissing, document.ErrPath,

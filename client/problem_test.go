@@ -44,7 +44,10 @@ func TestUnparsableBodyIsUnavailable(t *testing.T) {
 	assert.ErrorIs(t, err, document.ErrUnavailable)
 }
 
-func TestUnrecognizedRefusalIsUnavailableNotAGuess(t *testing.T) {
+// TestUnrecognizedRefusalIsErrUnavailableNotAGuess names ErrUnavailable's
+// contract: a transport fault, never a statement about the document — asserted
+// both ways, ErrorIs the transport sentinel and NotErrorIs a document one.
+func TestUnrecognizedRefusalIsErrUnavailableNotAGuess(t *testing.T) {
 	t.Parallel()
 	// A refusal the adapter cannot map must not be turned into a document
 	// sentinel: guessing would make the two adapters disagree silently.
