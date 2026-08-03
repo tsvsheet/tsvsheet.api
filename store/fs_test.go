@@ -3,6 +3,8 @@
 package store
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -173,4 +175,42 @@ func TestRefusedNamesCarryTheirSyscallCause(t *testing.T) {
 	require.Error(t, invalid)
 	assert.ErrorIs(t, invalid, syscall.EINVAL, "a NUL in a name is EINVAL underneath")
 	assert.ErrorIs(t, invalid, document.ErrMissing)
+}
+
+// TestParseStored_MapsBothRefusals pins the stored-parse mapping directly —
+// the TOCTOU half of the budget contract (a file that grew between the
+// pre-flight and the read still refuses as the sentinel) and the corrupt
+// half (a scan-refused document is ErrParse naming the path).
+func TestParseStored_MapsBothRefusals(t *testing.T) {
+	t.Parallel()
+
+	tight := tsvsheet.DefaultLimits()
+	tight.ResidentCells = 1
+	_, err := parseStored([]byte("1\t2\n3\t4\n"), tight, "grew.tsvt")
+	require.ErrorIs(t, err, tsvsheet.ErrDocTooLarge, "grown-past-the-vet bytes refuse as the sentinel")
+
+	long := append(bytes.Repeat([]byte{'a'}, (1<<20)+2), '\n')
+	_, err = parseStored(long, tsvsheet.DefaultLimits(), "corrupt.tsvt")
+	require.ErrorIs(t, err, ErrParse)
+	assert.Contains(t, err.Error(), "corrupt.tsvt")
+
+	doc, err := parseStored([]byte("ok\n"), tsvsheet.DefaultLimits(), "ok.tsvt")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("ok\n"), doc.Text())
+}
+
+// TestStore_ScanRefusedFileFallsToTheReadPath pins vetFile's fall-through: a
+// stored file the census scanner itself refuses (a line past the ceiling) is
+// not the pre-flight's to report — the read path answers ErrParse, its
+// single voice for corrupt stores.
+func TestStore_ScanRefusedFileFallsToTheReadPath(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	long := append(bytes.Repeat([]byte{'a'}, (1<<20)+2), '\n')
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "longline.tsvt"), long, 0o600))
+	st, err := Open(RootDir(dir), tsvsheet.DefaultLimits())
+	require.NoError(t, err)
+	_, err = st.Get(context.Background(), "longline.tsvt")
+	require.ErrorIs(t, err, ErrParse)
 }

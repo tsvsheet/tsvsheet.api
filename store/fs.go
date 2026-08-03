@@ -21,6 +21,9 @@ func (s *Store) load(p DocPath) (tsvsheet.Document, Snapshot, error) {
 	if err := document.Validate(p); err != nil {
 		return tsvsheet.Document{}, Snapshot{}, err
 	}
+	if err := s.vetFile(p); err != nil {
+		return tsvsheet.Document{}, Snapshot{}, err
+	}
 	raw, err := s.root.ReadFile(string(p))
 	if errors.Is(err, fs.ErrNotExist) || isRefusedPath(err) {
 		// A path os.Root refuses — an escaping symlink, a name the OS will not
@@ -32,17 +35,55 @@ func (s *Store) load(p DocPath) (tsvsheet.Document, Snapshot, error) {
 	if err != nil {
 		return tsvsheet.Document{}, Snapshot{}, ErrRead.With(err, "path", string(p))
 	}
-	doc, err := tsvsheet.ParseDocumentWith(raw, s.limits)
-	if errors.Is(err, tsvsheet.ErrDocTooLarge) {
-		// A stored document past the server's resident budget refuses honestly
-		// (spec 018): the sentinel passes through so the API maps it to its
-		// own documented status, never an unbounded materialization.
+	doc, err := parseStored(raw, s.limits, p)
+	if err != nil {
 		return tsvsheet.Document{}, Snapshot{}, err
 	}
-	if err != nil {
-		return tsvsheet.Document{}, Snapshot{}, ErrParse.With(err, "path", string(p))
-	}
 	return doc, snapshotOf(doc), nil
+}
+
+// parseStored maps the bounded parse's outcomes for a stored document: an
+// over-budget refusal passes through as the sentinel the API maps to its own
+// documented status (the pre-flight vets the file first, but the bytes just
+// read are what parse — a file that grew in between still refuses here);
+// any other failure is a corrupt store, ErrParse naming the path.
+func parseStored(raw []byte, limits tsvsheet.Limits, p DocPath) (tsvsheet.Document, error) {
+	doc, err := tsvsheet.ParseDocumentWith(raw, limits)
+	if errors.Is(err, tsvsheet.ErrDocTooLarge) {
+		return tsvsheet.Document{}, err
+	}
+	if err != nil {
+		return tsvsheet.Document{}, ErrParse.With(err, "path", string(p))
+	}
+	return doc, nil
+}
+
+// vetFile census-vets the stored file through ReadAt BEFORE buffering it
+// (spec 018): an over-budget document refuses in O(index) memory instead of
+// holding a whole-file transient just to say no —
+// TestStore_RefusesOverBudgetDocuments discriminates this by the
+// path-naming refusal only the pre-flight builds. Stat/open failures fall
+// through to the read path so its own error mapping (missing, refused,
+// unreadable) stays the single voice.
+func (s *Store) vetFile(p DocPath) error {
+	f, err := s.root.Open(string(p))
+	if err != nil {
+		return nil // the read path reports open failures with its own mapping
+	}
+	defer func() { _ = f.Close() }()
+	var size int64
+	if info, statErr := f.Stat(); statErr == nil {
+		size = info.Size() // a failed stat leaves size 0: a trivially in-budget census, deferring to the read path
+	}
+	census, err := tsvsheet.Census(tsvsheet.ByteSource{ReadAt: f, Size: size})
+	if err != nil {
+		return nil // a scan refusal re-surfaces from the parse with ErrParse context
+	}
+	if census.Cells > s.limits.EffectiveResidentCells() {
+		return tsvsheet.ErrDocTooLarge.With(nil,
+			"cells", census.Cells, "budget", s.limits.EffectiveResidentCells(), "path", string(p))
+	}
+	return nil
 }
 
 // check verifies a Put precondition under the held lock, reporting whether the
