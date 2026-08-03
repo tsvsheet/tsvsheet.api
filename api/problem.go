@@ -30,6 +30,7 @@ const (
 	SlugStaleBase    = problemStaleBase
 	SlugRefusedEdits = problemRefusedEdits
 	SlugBadDocument  = problemBadDocument
+	SlugDocTooLarge  = problemDocTooLarge
 	SlugBadEdits     = problemBadEdits
 )
 
@@ -42,6 +43,7 @@ const (
 	problemRefusedEdits  problemSlug = "refused-edits"
 	problemStaleBase     problemSlug = "stale-base"
 	problemBadDocument   problemSlug = "bad-document"
+	problemDocTooLarge   problemSlug = "document-too-large"
 	problemConflict      problemSlug = "conflict"
 	problemUnsupported   problemSlug = "unsupported-media-type"
 	problemNotAcceptable problemSlug = "not-acceptable"

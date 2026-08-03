@@ -32,7 +32,13 @@ func (s *Store) load(p DocPath) (tsvsheet.Document, Snapshot, error) {
 	if err != nil {
 		return tsvsheet.Document{}, Snapshot{}, ErrRead.With(err, "path", string(p))
 	}
-	doc, err := tsvsheet.ParseDocument(raw)
+	doc, err := tsvsheet.ParseDocumentWith(raw, s.limits)
+	if errors.Is(err, tsvsheet.ErrDocTooLarge) {
+		// A stored document past the server's resident budget refuses honestly
+		// (spec 018): the sentinel passes through so the API maps it to its
+		// own documented status, never an unbounded materialization.
+		return tsvsheet.Document{}, Snapshot{}, err
+	}
 	if err != nil {
 		return tsvsheet.Document{}, Snapshot{}, ErrParse.With(err, "path", string(p))
 	}

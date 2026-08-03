@@ -175,6 +175,7 @@ var errorMap = []errorMapping{
 	{is: document.ErrPrecondition, slug: problemPrecondition, status: http.StatusPreconditionFailed},
 	{is: document.ErrExists, slug: problemConflict, status: http.StatusConflict},
 	{is: document.ErrSyntax, slug: problemBadDocument, status: http.StatusUnprocessableEntity},
+	{is: tsvsheet.ErrDocTooLarge, slug: problemDocTooLarge, status: http.StatusRequestEntityTooLarge},
 	{is: tsvsheet.ErrEditsBase, slug: problemStaleBase, status: http.StatusUnprocessableEntity},
 	{is: tsvsheet.ErrEditsApply, slug: problemRefusedEdits, status: http.StatusUnprocessableEntity},
 }

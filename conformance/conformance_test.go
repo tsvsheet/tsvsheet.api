@@ -192,3 +192,68 @@ func TestConformanceApplyMissingDocument(t *testing.T) {
 		assert.ErrorIs(t, err, document.ErrMissing)
 	})
 }
+
+// tightAdapters mirror adapters with a one-cell resident budget, so the
+// over-budget refusal behaviour runs against both ports like every other
+// behaviour (spec 018).
+var tightAdapters = map[string]func(*testing.T, map[string]string) document.Port{
+	"embedded": func(t *testing.T, files map[string]string) document.Port {
+		return openTightStore(t, files)
+	},
+	"client": func(t *testing.T, files map[string]string) document.Port {
+		handler := api.NewHandler(api.Config{
+			Port:           openTightStore(t, files),
+			Limits:         tightLimits(),
+			ComputeEnabled: api.WithComputePlane,
+			Clock:          func() time.Time { return time.Unix(1_700_000_000, 0).UTC() },
+		})
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		return client.New(client.BaseURL(server.URL), server.Client())
+	},
+}
+
+// tightLimits is a one-cell resident budget; the seed is over it.
+func tightLimits() tsvsheet.Limits {
+	limits := tsvsheet.DefaultLimits()
+	limits.ResidentCells = 1
+	return limits
+}
+
+// openTightStore seeds a root and confines a one-cell-budget store to it.
+func openTightStore(t *testing.T, files map[string]string) *store.Store {
+	t.Helper()
+	dir := t.TempDir()
+	for name, content := range files {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
+	}
+	st, err := store.Open(store.RootDir(dir), tightLimits())
+	require.NoError(t, err)
+	return st
+}
+
+// TestOverBudgetDocumentRefusesAcrossAdapters pins the 018 contract on both
+// ports identically: a stored document past the server's resident budget
+// refuses reads as ErrDocTooLarge (the client reconstructs the same sentinel
+// from the 413 document-too-large problem), and a client may not store a body
+// the server could never load back — while an in-budget write on the same
+// port still succeeds, so the budget is the only thing refusing.
+func TestOverBudgetDocumentRefusesAcrossAdapters(t *testing.T) {
+	t.Parallel()
+
+	for name, build := range tightAdapters {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			port := build(t, conformance.Seeded()) // the 4-cell seed is over the 1-cell budget
+
+			_, err := port.Get(context.Background(), "a.tsvt")
+			assert.ErrorIs(t, err, tsvsheet.ErrDocTooLarge, "an over-budget stored document refuses reads")
+
+			_, _, err = port.Put(context.Background(), "b.tsvt", []byte("1\t2\n3\t4\n"), document.ExpectAbsent())
+			assert.ErrorIs(t, err, tsvsheet.ErrDocTooLarge, "an over-budget body refuses storage")
+
+			_, _, err = port.Put(context.Background(), "c.tsvt", []byte("1\n"), document.ExpectAbsent())
+			assert.NoError(t, err, "an in-budget write on the same port succeeds — only the budget refuses")
+		})
+	}
+}
