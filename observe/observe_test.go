@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -251,4 +252,32 @@ func TestLevelGradesEveryClass(t *testing.T) {
 	} {
 		assert.Equal(t, want, levelFor(status), "status %d", status)
 	}
+}
+
+// TestConcurrentMetricsUnderOnePrefix pins the race the CLI's parallel tests
+// found: constructing two servers under the same prefix at the same time must
+// adopt one published map, not panic on the duplicate. Two servers in one
+// process is ordinary, and a Get followed by a NewMap is two operations.
+func TestConcurrentMetricsUnderOnePrefix(t *testing.T) {
+	t.Parallel()
+
+	const racers = 16
+	ready := make(chan struct{})
+	done := make(chan ExpvarMetrics, racers)
+	for range racers {
+		go func() {
+			<-ready // release them together, so the Get/NewMap window overlaps
+			done <- NewExpvarMetrics("test_race")
+		}()
+	}
+	close(ready)
+
+	for range racers {
+		m := <-done
+		m.RequestServed(Observation{Method: "GET", Status: 200})
+	}
+	counted, ok := expvar.Get("test_race_requests").(*expvar.Map)
+	require.True(t, ok)
+	assert.Equal(t, strconv.Itoa(racers), counted.Get("GET 200").String(),
+		"every racer counted into the one published map")
 }
