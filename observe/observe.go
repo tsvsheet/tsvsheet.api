@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -179,10 +180,20 @@ func NewExpvarMetrics(prefix MetricsPrefix) ExpvarMetrics {
 // varName is a published expvar variable's name.
 type varName string
 
+// registry serialises get-or-create against the expvar registry. expvar's own
+// state is mutex-protected, but a Get followed by a NewMap is two operations:
+// two servers constructed concurrently under one prefix both saw no map and
+// both published, and the loser panicked. Two `tsv data` servers in one
+// process is an ordinary thing to want, and it is how the CLI's parallel
+// tests found this.
+var registry sync.Mutex
+
 // publishedMap returns the named expvar map, adopting one already published
 // under that name — expvar panics on a duplicate, and a second server or a
 // second test in one process is an ordinary thing to want.
 func publishedMap(name varName) *expvar.Map {
+	registry.Lock()
+	defer registry.Unlock()
 	if published, ok := expvar.Get(string(name)).(*expvar.Map); ok {
 		return published
 	}
