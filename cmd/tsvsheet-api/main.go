@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/tsvsheet/tsvsheet.api/api"
 	"github.com/tsvsheet/tsvsheet.api/internal/constants"
+	"github.com/tsvsheet/tsvsheet.api/observe"
 	"github.com/tsvsheet/tsvsheet.api/store"
 )
 
@@ -156,7 +158,13 @@ func buildServer(c *cli.Command) (*http.Server, error) {
 		ComputeEnabled: api.ComputePlane(!c.Bool(flagNoCompute)),
 		Clock:          clock,
 	})
-	return &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: headerTimeout}, nil
+	// R17: the server — not the handler — owes the operator a record of every
+	// request and counters to watch. Metrics land in expvar, readable wherever
+	// the process serves /debug/vars.
+	served := observe.Handler(handler, slog.Default(), observe.NewExpvarMetrics("tsvsheet_api"))
+	slog.Info("serving the document api",
+		"url", "http://"+addr+"/", "root", c.String(flagRoot), "compute", !c.Bool(flagNoCompute))
+	return &http.Server{Addr: addr, Handler: served, ReadHeaderTimeout: headerTimeout}, nil
 }
 
 // headerTimeout bounds how long a client may dawdle over its request head.

@@ -30,7 +30,9 @@ const (
 // functions are deterministic under test.
 type Clock func() time.Time
 
-// Config assembles a handler.
+// Config assembles a handler. Observability is deliberately absent: it is a
+// decorator a server applies (observe.Handler), not a handler feature — see
+// R17 and the observe package.
 type Config struct {
 	Port           document.Port
 	Clock          Clock
