@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"expvar"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -215,21 +217,26 @@ func TestObservabilityIsOptional(t *testing.T) {
 // a repeated prefix adopts the published maps rather than panicking — two
 // servers in one process is an ordinary thing to want.
 func TestExpvarMetricsCountAndTime(t *testing.T) {
-	m := NewExpvarMetrics("test_alpha")
+	// Unique per invocation: expvar is process-global and the gate runs each
+	// suite twice in one process, so a fixed prefix makes the second run inherit
+	// the first's counts and every absolute assertion here doubles.
+	prefix := MetricsPrefix(fmt.Sprintf("test_alpha_%d", raceRun.Add(1)))
+
+	m := NewExpvarMetrics(prefix)
 	m.RequestServed(Observation{Method: "GET", Status: 200, Duration: 7 * time.Millisecond})
 	m.RequestServed(Observation{Method: "GET", Status: 200, Duration: 3 * time.Millisecond})
 	m.RequestServed(Observation{Method: "PUT", Status: 412})
 
-	requests, ok := expvar.Get("test_alpha_requests").(*expvar.Map)
+	requests, ok := expvar.Get(string(prefix) + "_requests").(*expvar.Map)
 	require.True(t, ok)
 	assert.Equal(t, "2", requests.Get("GET 200").String())
 	assert.Equal(t, "1", requests.Get("PUT 412").String())
 
-	durations, ok := expvar.Get("test_alpha_duration_ms").(*expvar.Map)
+	durations, ok := expvar.Get(string(prefix) + "_duration_ms").(*expvar.Map)
 	require.True(t, ok)
 	assert.Equal(t, "10", durations.Get("GET 200").String(), "latency sums")
 
-	again := NewExpvarMetrics("test_alpha")
+	again := NewExpvarMetrics(prefix)
 	again.RequestServed(Observation{Method: "GET", Status: 200})
 	assert.Equal(t, "3", requests.Get("GET 200").String(), "a repeated prefix adopts, never panics")
 }
@@ -258,8 +265,16 @@ func TestLevelGradesEveryClass(t *testing.T) {
 // found: constructing two servers under the same prefix at the same time must
 // adopt one published map, not panic on the duplicate. Two servers in one
 // process is ordinary, and a Get followed by a NewMap is two operations.
+// raceRun numbers each invocation of the test below so its expvar names never
+// collide with a previous run in the same process.
+var raceRun atomic.Int64
+
 func TestConcurrentMetricsUnderOnePrefix(t *testing.T) {
 	t.Parallel()
+
+	// Unique per invocation for the same reason: a fixed name made the second
+	// run accumulate onto the first's map and assert 16 against 32.
+	prefix := fmt.Sprintf("test_race_%d", raceRun.Add(1))
 
 	const racers = 16
 	ready := make(chan struct{})
@@ -267,7 +282,7 @@ func TestConcurrentMetricsUnderOnePrefix(t *testing.T) {
 	for range racers {
 		go func() {
 			<-ready // release them together, so the Get/NewMap window overlaps
-			done <- NewExpvarMetrics("test_race")
+			done <- NewExpvarMetrics(MetricsPrefix(prefix))
 		}()
 	}
 	close(ready)
@@ -276,7 +291,7 @@ func TestConcurrentMetricsUnderOnePrefix(t *testing.T) {
 		m := <-done
 		m.RequestServed(Observation{Method: "GET", Status: 200})
 	}
-	counted, ok := expvar.Get("test_race_requests").(*expvar.Map)
+	counted, ok := expvar.Get(prefix + "_requests").(*expvar.Map)
 	require.True(t, ok)
 	assert.Equal(t, strconv.Itoa(racers), counted.Get("GET 200").String(),
 		"every racer counted into the one published map")
