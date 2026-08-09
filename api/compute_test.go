@@ -217,3 +217,13 @@ func TestComputeHonoursTheConfiguredLimits(t *testing.T) {
 	uncapped.ServeHTTP(wide, httptest.NewRequest(http.MethodGet, "/big.tsvt!A1", nil))
 	assert.Len(t, wide.Body.String(), 5001, "and without it the same read is served in full")
 }
+
+// TestComputedNamedValues pins the 023 seam over HTTP: a sheet declaring
+// names with the |@ meta clause computes its @references through the wire —
+// so the API cannot silently lag the engine's grammar.
+func TestComputedNamedValues(t *testing.T) {
+	h := newHandler(t, map[string]string{"a.tsvt": "=0.08 |@ named(Rate)\t=@Rate * 100\n"}, WithComputePlane)
+	rec := do(h, http.MethodGet, "/a.tsvt", "", map[string]string{"Accept": TypeSheet})
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "0.08\t8\n", rec.Body.String())
+}
